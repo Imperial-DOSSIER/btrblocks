@@ -475,6 +475,44 @@ Result run64(const std::string& dataset_name,
   return result;
 }
 // -------------------------------------------------------------------------------------
+// Reads up to `max_count` values from a flat little-endian int64 file, as
+// produced by parquet_to_i64.py.
+//
+// Real data arrives as Parquet, which BtrBlocks cannot read and should not grow
+// a dependency on for one benchmark input, so the conversion happens once
+// out-of-band and this end stays an ifstream.
+//
+// Returns empty on any failure rather than throwing: a missing or unreadable
+// file should cost the caller one dataset, not a whole sweep.
+std::vector<s64> readInt64Column(const std::string& path, uint32_t max_count) {
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in.good()) {
+    return {};
+  }
+  const auto bytes = static_cast<std::streamoff>(in.tellg());
+  if (bytes <= 0) {
+    return {};
+  }
+
+  // Short files are used as-is rather than cycled: repeating a column would
+  // manufacture periodicity that flatters every codec measured on it.
+  const auto available = static_cast<std::size_t>(bytes) / sizeof(s64);
+  const auto count = std::min<std::size_t>(available, max_count);
+
+  std::vector<s64> values(count);
+  in.seekg(0);
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(count * sizeof(s64)));
+  if (!in) {
+    return {};
+  }
+  if (count < max_count) {
+    std::cerr << "note: " << path << " holds " << available << " values, fewer than the requested "
+              << max_count << "\n";
+  }
+  return values;
+}
+// -------------------------------------------------------------------------------------
 std::vector<uint32_t> parseUintList(const std::string& text) {
   std::vector<uint32_t> values;
   std::stringstream stream(text);
@@ -495,6 +533,7 @@ int main(int argc, char** argv) {
   int repeats = 5;
   uint32_t seed = 42;
   std::string csv_path;
+  std::string input_i64;
 
   for (int i = 1; i < argc; i++) {
     const std::string arg = argv[i];
@@ -509,9 +548,15 @@ int main(int argc, char** argv) {
       seed = static_cast<uint32_t>(std::strtoul(next().c_str(), nullptr, 10));
     } else if (arg == "--csv") {
       csv_path = next();
+    } else if (arg == "--input-i64") {
+      input_i64 = next();
     } else if (arg == "--help") {
       std::cout << "usage: subintsplit_bench [--rows N] [--block-sizes a,b,c] [--repeats N]"
-                   " [--seed N] [--csv PATH]\n";
+                   " [--seed N] [--csv PATH] [--input-i64 PATH]\n"
+                   "\n"
+                   "  --input-i64 PATH  add a 64-bit dataset read from a flat little-endian\n"
+                   "                    int64 file, for measuring against real data rather\n"
+                   "                    than generated. Produce one with parquet_to_i64.py.\n";
       return 0;
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
@@ -559,11 +604,25 @@ int main(int argc, char** argv) {
       {"uniform", generateUniform<INTEGER>(rows, seed)},
       {"increasing", generateIncreasing<INTEGER>(rows, seed)},
   };
-  const std::vector<Dataset64> datasets64{
+  std::vector<Dataset64> datasets64{
       {"snowflake", generateSnowflakes<s64>(rows, instagramSnowflake64(), seed)},
       {"uniform", generateUniform<s64>(rows, seed)},
       {"increasing", generateIncreasing<s64>(rows, seed)},
   };
+
+  // Real identifiers, when a converted column is supplied. The generated
+  // snowflake above is a controlled reference and an easy one -- its timestamp
+  // advances monotonically, so every field has textbook structure. Real IDs
+  // arrive unsorted, which removes exactly that structure, so this is the
+  // number to quote.
+  if (!input_i64.empty()) {
+    auto values = readInt64Column(input_i64, rows);
+    if (values.empty()) {
+      std::cerr << "warning: could not read " << input_i64 << ", skipping the tweet_ids dataset\n";
+    } else {
+      datasets64.push_back({"tweet_ids", std::move(values)});
+    }
+  }
 
   std::ofstream file;
   if (!csv_path.empty()) {
