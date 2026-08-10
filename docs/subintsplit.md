@@ -161,6 +161,77 @@ for free.
 Scope: `IntegerScheme` only. `DoubleScheme` would be a mechanical addition; `StringScheme` is a
 different problem (variable length, `decompressNoCopy`).
 
+## Datasets
+
+Four inputs, one real and three generated. Every figure below is measured over the first 1,048,576
+rows — the benchmark's default — not asserted from the generator definitions.
+
+| Dataset | Source | Width | Structure | Role |
+|---|---|---|---|---|
+| `tweet_ids` | Real: 30.7M Twitter IDs | 64 | Four bit-fields, timestamp near-unique per row | **The number to quote** |
+| `snowflake` | Generated | 32 & 64 | Same field shape, dense burst | Upper bound: the easy case |
+| `increasing` | Generated | 32 & 64 | Monotone, small steps | What bit-packing already handles |
+| `uniform` | Generated | 32 & 64 | No structure | **Control:** a split must not help |
+
+### `tweet_ids` — real Twitter identifiers
+
+`EncodingsPlayground/Datasets/TwitterSnowflake/tweet_ids.parquet`, the same column the research
+harness uses. 30,761,504 `int64` values; the benchmark reads the leading `--rows` of them.
+
+Layout is Twitter's, and the fields behave very differently from one another:
+
+| Field | Bits | Distinct | Range | Avg run |
+|---|---|---|---|---|
+| `sequence` | 0–11 (12) | 4,096 | 0–4,095 | 1.6 |
+| `worker` | 12–16 (5) | 32 | 0–31 | 1.1 |
+| `datacenter` | 17–21 (5) | 32 | 0–31 | 8.3 |
+| `timestamp` | 22–62 (41) | 992,155 | spans ~527 days | 1.0 |
+
+The column is **99.96% descending** — newest ID first, the usual export order — with a few large
+discontinuities where sources were concatenated.
+
+The property that actually governs compressibility is not the ordering but the **sampling density**:
+these are ~1M tweets drawn across roughly 527 days, a median of ~47 minutes apart. At millisecond
+resolution that means the 41-bit timestamp field takes a near-unique value on every row (992,155
+distinct in 1,048,576, average run 1.0). There is simply nothing for a run- or dictionary-based scheme
+to exploit in the field that occupies two thirds of the value.
+
+### `snowflake` — generated, and deliberately the easy case
+
+Instagram's layout: 41-bit timestamp, 13-bit shard, 10-bit sequence at 64 bits; a 21/7/4 analogue at
+32 bits. The shard field carries only 16 of its 8,192 possible values (5 of 128 at 32 bits), which is
+realistic — a deployment sizes the field for growth.
+
+| Field (64-bit) | Bits | Distinct | Avg run |
+|---|---|---|---|
+| `sequence` | 0–9 (10) | 1,024 | 1.0 |
+| `shard` | 10–22 (13) | 16 | 1.1 |
+| `timestamp` | 23–63 (41) | 1,024 | **1,024.0** |
+
+That last figure is the whole difference from the real data. The generator models a **dense burst** —
+it emits 1,024 IDs per millisecond before ticking the clock — so across a million rows the timestamp
+takes just 1,024 distinct values in runs of 1,024. The real column's timestamp takes 992,155 values in
+runs of 1.
+
+So `snowflake` is best read as an upper bound on what splitting can achieve, and `tweet_ids` as what
+it achieves on data nobody shaped for it. The two differ by roughly 4x in ratio for exactly this
+reason.
+
+### `increasing` — monotone, with a caveat
+
+Starts at 1,000,000 and steps by 1–8. Strictly ascending, every value distinct.
+
+Worth being explicit about why this scores so well at 64 bits: over a million rows the values never
+exceed 2^23, so **41 of the 64 bits are constant zero**. Much of the ratio there comes from isolating
+that dead range rather than from anything subtle, and it flatters the 64-bit numbers. The 32-bit arm,
+where only 9 bits are dead, is the more meaningful reading.
+
+### `uniform` — the control
+
+Full-width random values: all 64 bits live, every value distinct, no runs. There is no bit-range
+structure to find, so a split cannot help. Any ratio above 1.00 here would mean the planner had
+fooled itself, and the size bound is what guarantees it never lands below.
+
 ## Results
 
 Produced by `subintsplit_bench`; see *Reproducing* below. Compression ratio is raw bytes over encoded
@@ -170,6 +241,10 @@ One million rows per dataset, five repeats, median. `AUTO_BASELINE` is automatic
 SubIntSplit taken out of the pool — what BtrBlocks does today. `*_HALVES` is a fixed split at the
 32-bit boundary (`0-15;16-31` and `0-31;32-63`), run through identical machinery so that the only
 difference from `*_PLANNED` is where the boundaries fall.
+
+See *Datasets* above for what each input is. In short: `tweet_ids` is real and is the number to
+quote; the generated `snowflake` is an upper bound, because its timestamp field repeats in runs of
+1,024 where the real one is near-unique per row.
 
 ### Compression ratio
 
@@ -205,6 +280,29 @@ worse than raw. A number above 1.00 there would mean the planner was fooling its
 
 `AUTO_WITH_SIS` matches `SIS_PLANNED` on every dataset, so the picker does select the scheme when it
 is available — though see limitation 5 before relying on that.
+
+### The planner recovers the real field layout
+
+On the real Twitter column the planner chooses:
+
+```
+0-2 ; 3-11 ; 12-17 ; 18-21 ; 22-50 ; 51-55 ; 56-63
+```
+
+Twitter's actual snowflake layout is `sequence` in bits 0–11, `worker id` in 12–16, `datacenter id`
+in 17–21 and `timestamp` in 22–62. Two of the three field boundaries — **12** and **22** — are
+recovered exactly, and the third lands one bit out (18 against 17). The planner is given no schema,
+only 2048 sampled values.
+
+That it rediscovers the layout from the data is the clearest evidence the cost models are measuring
+something real rather than curve-fitting. It also explains the shape of the plan: the timestamp
+(22–63) is subdivided further, because its high bits barely move and go to `RLE` while its low bits
+do and go to `BP`; the near-constant `datacenter` range lands on `RLE`; the sequence and worker
+ranges land on `BP`.
+
+Boundary 18 rather than 17 is not really an error. `datacenter` holds only five distinct values in
+1–13, so bit 21 is almost never set and the entropy boundary genuinely sits a bit above the schema
+boundary.
 
 ### Speed
 
@@ -329,12 +427,34 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j --target subintsplit_bench    # explicit target: the playground
                                                      # tools pull in the AWS SDK
 ./build/subintsplit_bench --rows 1048576 --block-sizes 4096,8192,65536 --repeats 5 \
-                          --csv results.csv
+                          --input-i64 build/tweet_ids.i64 --csv results.csv
 ```
 
-Datasets are generated in memory from a seed — snowflake, uniformly random, and slowly increasing.
-Uniform data is a control: it has no bit-range structure, so a split cannot help, and anything other
-than parity there would mean the planner is fooling itself.
+Three datasets are generated in memory from a seed — snowflake, uniformly random, and slowly
+increasing. Uniform data is a control: it has no bit-range structure, so a split cannot help, and
+anything other than parity there would mean the planner is fooling itself.
+
+### The real dataset
+
+`--input-i64` adds a 64-bit dataset read from a flat little-endian `int64` file. BtrBlocks has no
+Parquet reader and should not grow a dependency on Arrow for one benchmark input, so the conversion
+happens once, out of band:
+
+```
+# Note the interpreter. The project's own .venv has pandas but not pyarrow;
+# the research harness's venv has it.
+../EncodingsPlayground/Benchmarks/.venv/bin/python3 tools/subintsplit/parquet_to_i64.py \
+    --parquet ../EncodingsPlayground/Datasets/TwitterSnowflake/tweet_ids.parquet \
+    --out build/tweet_ids.i64 --limit 4000000
+```
+
+The full column is 30,761,504 rows — 246 MB as raw `int64` — so write it under `build/` (gitignored)
+or outside the repo, and use `--limit` to keep it to what the benchmark will actually read. The
+converted file is **not** committed.
+
+A file shorter than `--rows` is used as-is rather than cycled; repeating a column would manufacture
+periodicity that flatters every codec measured on it. A missing or unreadable file costs that one
+dataset and the sweep continues.
 
 Tests:
 
@@ -360,5 +480,6 @@ scheme, which is what keeps the random-access API honest as a cross-codec baseli
 | `btrblocks/scheme/integer/SubIntSplit.{hpp,cpp}` | The registered 32-bit scheme |
 | `btrblocks/scheme/integer/SubIntSplit64.{hpp,cpp}` | The free-standing 64-bit variant |
 | `tools/subintsplit/` | Benchmark driver, generators, traces |
+| `tools/subintsplit/parquet_to_i64.py` | One-off Parquet → flat int64 conversion for the real dataset |
 | `docs/subintsplit-porting.md` | Deviations from the Nimble original |
 | `docs/subintsplit-results.csv` | Raw output behind the tables above |
