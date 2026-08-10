@@ -218,6 +218,79 @@ class SubIntSplitCore {
   }
 
   // -----------------------------------------------------------------------------------
+  // Materialize only the requested rows.
+  //
+  // Each section is still decoded in full, because BtrBlocks sub-schemes expose
+  // no range or offset decode: BP and PFOR decompress a whole FastPFor array,
+  // DICT's codes are bit-packed, RLE has no run-offset index. So this saves the
+  // accumulation work for unwanted rows, not the sub-scheme work, and is a
+  // constant-factor win over decode() rather than an asymptotic one.
+  //
+  // The honest consequence -- SubIntSplit cannot offer real point access while
+  // its sub-schemes have none -- is recorded in docs/subintsplit.md rather than
+  // papered over here.
+  static void gather(UT* dest,
+                     const u8* src,
+                     u32 tuple_count,
+                     const u32* positions,
+                     u32 position_count,
+                     u32 level) {
+    const auto& header = *reinterpret_cast<const SubIntSplitHeader*>(src);
+    validate(header);
+    if (tuple_count == 0 || position_count == 0) {
+      return;
+    }
+
+    const auto* descriptors = reinterpret_cast<const SectionDescriptor*>(header.data);
+    const u8* payload =
+        src + sizeof(SubIntSplitHeader) + header.section_count * sizeof(SectionDescriptor);
+
+    if (isRaw(header, descriptors)) {
+      const auto* values = reinterpret_cast<const UT*>(payload);
+      for (u32 i = 0; i < position_count; i++) {
+        dest[i] = values[positions[i]];
+      }
+      return;
+    }
+
+    INTEGER* scratch = decodeScratch(tuple_count, level);
+
+    for (u8 s = 0; s < header.section_count; s++) {
+      const auto& descriptor = descriptors[s];
+      validate(descriptor, header.value_bits);
+
+      auto& scheme = IntegerSchemePicker::MyTypeWrapper::getScheme(descriptor.scheme_code);
+      scheme.decompress(scratch, nullptr, payload + descriptor.offset, tuple_count, level + 1);
+
+      const int shift = descriptor.bit_start;
+      const UT mask = maskFor(descriptor.bit_end - descriptor.bit_start + 1);
+      if (s == 0) {
+        for (u32 i = 0; i < position_count; i++) {
+          dest[i] = (static_cast<UT>(static_cast<u32>(scratch[positions[i]])) & mask) << shift;
+        }
+      } else {
+        for (u32 i = 0; i < position_count; i++) {
+          dest[i] |= (static_cast<UT>(static_cast<u32>(scratch[positions[i]])) & mask) << shift;
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------------------
+  // Largest encoding this can produce for `tuple_count` values: the raw
+  // fallback, which is what encode() falls back to whenever a plan would be
+  // bigger. The section-count cap is what makes this bound finite.
+  static u64 maxCompressedSize(u32 tuple_count) {
+    const auto max_sections = SchemeConfig::get().integers.subintsplit.max_sections;
+    const u64 header =
+        sizeof(SubIntSplitHeader) + static_cast<u64>(max_sections) * sizeof(SectionDescriptor);
+    // A section is abandoned as soon as the running total passes the raw size,
+    // so at most one section's worth of overshoot is ever written.
+    const u64 overshoot = static_cast<u64>(tuple_count) * sizeof(INTEGER) + 1024;
+    return header + static_cast<u64>(tuple_count) * sizeof(UT) + overshoot;
+  }
+
+  // -----------------------------------------------------------------------------------
   // Describes the split and each section's chosen scheme, e.g.
   //   SUB_INT_SPLIT[0-9;10-22;23-63] -> ([0-9] BP) -> ([10-22] ONE_VALUE) ...
   static std::string describe(const u8* src, const std::string& self) {
