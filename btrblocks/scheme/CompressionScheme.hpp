@@ -26,8 +26,7 @@ string ConvertSchemeTypeToString(StringSchemeType type);
 class IntegerScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(SInteger32Stats& stats,
-                                          [[maybe_unused]] u8 allowed_cascading_level);
+  virtual double expectedCompressionRatio(SInteger32Stats& stats, [[maybe_unused]] u8 allowed_cascading_level);
   // -------------------------------------------------------------------------------------
   virtual u32 compress(const INTEGER* src,
                        const BITMAP* nullmap,
@@ -91,8 +90,7 @@ class IntegerScheme {
 class DoubleScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(DoubleStats& stats,
-                                          [[maybe_unused]] u8 allowed_cascading_level);
+  virtual double expectedCompressionRatio(DoubleStats& stats, [[maybe_unused]] u8 allowed_cascading_level);
   // -------------------------------------------------------------------------------------
   virtual u32 compress(const DOUBLE* src,
                        const BITMAP* nullmap,
@@ -121,8 +119,7 @@ class DoubleScheme {
 class StringScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(StringStats& stats,
-                                          [[maybe_unused]] u8 allowed_cascading_level) = 0;
+  virtual double expectedCompressionRatio(StringStats& stats, [[maybe_unused]] u8 allowed_cascading_level) = 0;
 
   // -------------------------------------------------------------------------------------
   // TODO get rid of this function

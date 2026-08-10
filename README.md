@@ -42,6 +42,12 @@ For a list of all valid targets, run `make help`.
 
 Library was built and tested on Linux (x86, ARM) and MacOS (ARM).
 
+## Additional schemes
+
+- **SubIntSplit** — splits an integer into bit-range sub-streams chosen by a dynamic program and
+  compresses each independently, for values built from semantic bit-fields such as snowflake IDs.
+  Opt-in; 32- and 64-bit. See [docs/subintsplit.md](docs/subintsplit.md).
+
 ## Contributors
 
 Adnan Alhomssi
