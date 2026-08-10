@@ -40,6 +40,34 @@ class IntegerScheme {
                           u32 tuple_count,
                           u32 level) = 0;
   // -------------------------------------------------------------------------------------
+  // Random access within a single chunk. `positions` are chunk-local row
+  // indices in [0, tuple_count); `level` must match what decompress() expects.
+  //
+  // The default implementations decompress the chunk once into thread-local
+  // scratch and then index it, which gives every scheme a working -- and
+  // honest -- baseline: O(tuple_count + position_count) per gather() call,
+  // never O(position_count * tuple_count). Schemes able to address a single
+  // row without materializing the chunk override these.
+  //
+  // lookupAt() is deliberately left at O(tuple_count) per call rather than
+  // memoizing on `src`: that is the true cost of a point lookup against a
+  // scheme with no random access, and caching would be unsound anyway since
+  // the caller may reuse the buffer.
+  // -------------------------------------------------------------------------------------
+  virtual void gather(INTEGER* dest,
+                      const u8* src,
+                      BitmapWrapper* nullmap,
+                      u32 tuple_count,
+                      const u32* positions,
+                      u32 position_count,
+                      u32 level);
+  // -------------------------------------------------------------------------------------
+  virtual INTEGER lookupAt(const u8* src,
+                           BitmapWrapper* nullmap,
+                           u32 tuple_count,
+                           u32 position,
+                           u32 level);
+  // -------------------------------------------------------------------------------------
   virtual IntegerSchemeType schemeType() = 0;
   // -------------------------------------------------------------------------------------
   virtual INTEGER lookup(u32 id) = 0;
