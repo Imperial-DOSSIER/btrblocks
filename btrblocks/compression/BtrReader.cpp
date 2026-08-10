@@ -2,7 +2,10 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <algorithm>
 #include <cassert>
+#include <iterator>
+#include <vector>
 #include "common/Exceptions.hpp"
 #include "compression/SchemePicker.hpp"
 #include "extern/RoaringBitmap.hpp"
@@ -73,6 +76,80 @@ bool BtrReader::readColumn(std::vector<u8>& output_chunk_v, u32 index) {
   return requires_copy;
 }
 
+void BtrReader::gatherColumn(INTEGER* dest,
+                             const u32* positions,
+                             u32 position_count,
+                             u32* chunks_touched) {
+  if (chunks_touched != nullptr) {
+    *chunks_touched = 0;
+  }
+  if (position_count == 0) {
+    return;
+  }
+  if (this->getColumnType() != ColumnType::INTEGER) {
+    throw Generic_Exception("gatherColumn is only supported for INTEGER columns");
+  }
+
+  const u32 chunk_count = this->getChunkCount();
+
+  // Prefix sum of per-chunk tuple counts. Derived from metadata rather than
+  // assuming a uniform block_size, because the final chunk is short.
+  std::vector<u32> chunk_start(chunk_count + 1, 0);
+  for (u32 chunk_i = 0; chunk_i < chunk_count; chunk_i++) {
+    chunk_start[chunk_i + 1] = chunk_start[chunk_i] + this->getTupleCount(chunk_i);
+  }
+  const u32 total_tuples = chunk_start[chunk_count];
+
+  // Bucket the requested positions by chunk, remembering where each one came
+  // from so results can be scattered back in the caller's order.
+  std::vector<std::vector<u32>> local_positions(chunk_count);
+  std::vector<std::vector<u32>> output_slots(chunk_count);
+  for (u32 i = 0; i < position_count; i++) {
+    const u32 position = positions[i];
+    if (position >= total_tuples) {
+      throw Generic_Exception("gatherColumn position out of range");
+    }
+    // chunk_start is sorted; find the chunk containing this row.
+    const auto it = std::upper_bound(chunk_start.begin(), chunk_start.end(), position);
+    const auto chunk_i = static_cast<u32>(std::distance(chunk_start.begin(), it) - 1);
+    local_positions[chunk_i].push_back(position - chunk_start[chunk_i]);
+    output_slots[chunk_i].push_back(i);
+  }
+
+  std::vector<INTEGER> chunk_results;
+  u32 touched = 0;
+  for (u32 chunk_i = 0; chunk_i < chunk_count; chunk_i++) {
+    if (local_positions[chunk_i].empty()) {
+      continue;
+    }
+    touched++;
+
+    auto meta = this->getChunkMetadata(chunk_i);
+    auto input_data = static_cast<const u8*>(meta->data);
+    BitmapWrapper* bitmap = this->getBitmap(chunk_i);
+    auto& scheme = IntegerSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
+
+    const auto count = static_cast<u32>(local_positions[chunk_i].size());
+    chunk_results.resize(count);
+    scheme.gather(chunk_results.data(), input_data, bitmap, meta->tuple_count,
+                  local_positions[chunk_i].data(), count, 0);
+
+    for (u32 j = 0; j < count; j++) {
+      dest[output_slots[chunk_i][j]] = chunk_results[j];
+    }
+  }
+
+  if (chunks_touched != nullptr) {
+    *chunks_touched = touched;
+  }
+}
+// -------------------------------------------------------------------------------------
+INTEGER BtrReader::lookupColumn(u32 position) {
+  INTEGER result = 0;
+  this->gatherColumn(&result, &position, 1);
+  return result;
+}
+// -------------------------------------------------------------------------------------
 string BtrReader::getSchemeDescription(u32 index) {
   auto meta = this->getChunkMetadata(index);
   u8 compression = meta->compression_type;

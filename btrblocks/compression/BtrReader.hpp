@@ -14,6 +14,28 @@ class BtrReader {
   explicit BtrReader(void* data);
   virtual ~BtrReader();
   bool readColumn(std::vector<u8>& output_chunk, u32 index);
+  // -------------------------------------------------------------------------------------
+  // Column-level random access. `positions` are global row indices across the
+  // whole part; `dest` receives one value per requested position, in the order
+  // given. Positions are bucketed by chunk, so each touched chunk is decoded at
+  // most once regardless of how many positions fall inside it.
+  //
+  // Codec-agnostic: dispatches per chunk on that chunk's own compression_type,
+  // exactly as readColumn does, so it works for every registered scheme and
+  // picks up any scheme's native gather() override for free.
+  //
+  // INTEGER columns only; throws for other column types.
+  //
+  // `chunks_touched`, when non-null, receives the number of distinct chunks
+  // that had to be decoded -- the dominant term in the cost of a gather, and
+  // needed to interpret gather timings.
+  // -------------------------------------------------------------------------------------
+  void gatherColumn(INTEGER* dest,
+                    const u32* positions,
+                    u32 position_count,
+                    u32* chunks_touched = nullptr);
+  [[nodiscard]] INTEGER lookupColumn(u32 position);
+  // -------------------------------------------------------------------------------------
   [[nodiscard]] string getSchemeDescription(u32 index);
   [[nodiscard]] string getBasicSchemeDescription(u32 index);
 
