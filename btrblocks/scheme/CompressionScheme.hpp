@@ -26,7 +26,8 @@ string ConvertSchemeTypeToString(StringSchemeType type);
 class IntegerScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(SInteger32Stats& stats, [[maybe_unused]] u8 allowed_cascading_level);
+  virtual double expectedCompressionRatio(SInteger32Stats& stats,
+                                          [[maybe_unused]] u8 allowed_cascading_level);
   // -------------------------------------------------------------------------------------
   virtual u32 compress(const INTEGER* src,
                        const BITMAP* nullmap,
@@ -53,6 +54,9 @@ class IntegerScheme {
   // memoizing on `src`: that is the true cost of a point lookup against a
   // scheme with no random access, and caching would be unsound anyway since
   // the caller may reuse the buffer.
+  //
+  // Overrides must keep the empty cases no-ops -- zero tuples or zero
+  // positions yields nothing -- so that schemes stay interchangeable here.
   // -------------------------------------------------------------------------------------
   virtual void gather(INTEGER* dest,
                       const u8* src,
@@ -87,7 +91,8 @@ class IntegerScheme {
 class DoubleScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(DoubleStats& stats, [[maybe_unused]] u8 allowed_cascading_level);
+  virtual double expectedCompressionRatio(DoubleStats& stats,
+                                          [[maybe_unused]] u8 allowed_cascading_level);
   // -------------------------------------------------------------------------------------
   virtual u32 compress(const DOUBLE* src,
                        const BITMAP* nullmap,
@@ -116,7 +121,8 @@ class DoubleScheme {
 class StringScheme {
  public:
   // -------------------------------------------------------------------------------------
-  virtual double expectedCompressionRatio(StringStats& stats, [[maybe_unused]] u8 allowed_cascading_level) = 0;
+  virtual double expectedCompressionRatio(StringStats& stats,
+                                          [[maybe_unused]] u8 allowed_cascading_level) = 0;
 
   // -------------------------------------------------------------------------------------
   // TODO get rid of this function

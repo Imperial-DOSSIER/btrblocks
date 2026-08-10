@@ -51,6 +51,17 @@ void SubIntSplit::decompress(INTEGER* dest,
   Core::decode(reinterpret_cast<u32*>(dest), src, tuple_count, level);
 }
 // -------------------------------------------------------------------------------------
+void SubIntSplit::gather(INTEGER* dest,
+                         const u8* src,
+                         BitmapWrapper* nullmap,
+                         u32 tuple_count,
+                         const u32* positions,
+                         u32 position_count,
+                         u32 level) {
+  (void)nullmap;
+  Core::gather(reinterpret_cast<u32*>(dest), src, tuple_count, positions, position_count, level);
+}
+// -------------------------------------------------------------------------------------
 std::string SubIntSplit::fullDescription(const u8* src) {
   return Core::describe(src, this->selfDescription());
 }
