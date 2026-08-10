@@ -250,25 +250,35 @@ quote; the generated `snowflake` is an upper bound, because its timestamp field 
 
 `block_size = 65536`, higher is better.
 
-| | snowflake | increasing | uniform *(control)* |
-|---|---|---|---|
-| **32-bit** | | | |
-| `BP` | 1.11 | 1.43 | 1.00 |
-| `PFOR` | 1.12 | 1.44 | 1.00 |
-| `AUTO_BASELINE` | 1.11 | 1.43 | 1.00 |
-| `SIS_HALVES` | 2.63 | 2.09 | 1.00 |
-| **`SIS_PLANNED`** | **4.11** | **4.29** | 1.00 |
-| **64-bit** | | | |
-| `RAW64` | 1.00 | 1.00 | 1.00 |
-| `SIS64_HALVES` | 2.06 | 2.87 | 1.00 |
-| **`SIS64_PLANNED`** | **6.29** | **8.58** | 1.00 |
+| | `tweet_ids` *(real)* | snowflake | increasing | uniform *(control)* |
+|---|---|---|---|---|
+| **32-bit** | | | | |
+| `BP` | — | 1.11 | 1.43 | 1.00 |
+| `PFOR` | — | 1.12 | 1.44 | 1.00 |
+| `AUTO_BASELINE` | — | 1.11 | 1.43 | 1.00 |
+| `SIS_HALVES` | — | 2.63 | 2.09 | 1.00 |
+| **`SIS_PLANNED`** | — | **4.11** | **4.29** | 1.00 |
+| **64-bit** | | | | |
+| `RAW64` | 1.00 | 1.00 | 1.00 | 1.00 |
+| `SIS64_HALVES` | 1.09 | 2.06 | 2.87 | 1.00 |
+| **`SIS64_PLANNED`** | **1.55** | **6.29** | **8.58** | 1.00 |
 
-Three things to read out of this.
+`tweet_ids` is 64-bit only, matching the research harness: truncating a 64-bit snowflake to 32 bits
+would destroy the field structure under test.
 
-**Splitting is worth a lot on bit-field data, and choosing where to split is worth most of it.** On
-64-bit snowflakes the planner reaches 6.29× where the naive halves split reaches 2.06× — so roughly
-two thirds of the benefit comes from the boundaries, not from splitting per se. Snowflake fields do
-not fall on a 32-bit boundary, which is exactly the case a fixed split cannot serve.
+Four things to read out of this.
+
+**On real data the scheme wins, but modestly: 1.55× where nothing else manages anything at all.**
+BtrBlocks has no 64-bit codec, so the alternative really is 1.00×. The gain is real but it is not the
+6.29× the generated snowflake suggests, and the generated figure should not be quoted as if it were.
+The gap is entirely explained by sampling density — see *Datasets*: the real timestamp field is
+near-unique per row, the generated one repeats in runs of 1,024.
+
+**Choosing where to split is worth most of the benefit, and more so on real data.** At 64 bits the
+planner reaches 6.29× against the fixed halves split's 2.06× on generated data, and 1.55× against
+1.09× on real. On the real column the fixed split recovers almost nothing (1.09×), because Twitter's
+field boundaries — 12, 17, 22 — are nowhere near bit 32. That is the case a fixed split structurally
+cannot serve, and it is why the planner exists.
 
 **The gain over the incumbent is large because the incumbent has nothing to work with.** Bit-packing
 a snowflake is bounded by the timestamp's magnitude, so `BP` and `PFOR` manage 1.1×. That is not a
@@ -318,17 +328,25 @@ Snowflake, `block_size = 65536`, milliseconds. Gather is 4096 clustered position
 | `AUTO_BASELINE` | 376 | 1.37 | 1.15 | 17.91 |
 | `SIS_PLANNED` (32) | 1570 | 5.38 | 4.45 | 53.42 |
 | `SIS64_PLANNED` | 1383 | 7.40 | 3.46 | 51.75 |
+| `SIS64_PLANNED` on `tweet_ids` | 2462 | 8.24 | 5.24 | 70.46 |
 
 Encode is 4× the incumbent and gets worse as blocks shrink, because planning runs per chunk: at
 `block_size = 4096` the same column costs 8337 ms against 621 ms, tracking the chunk count almost
 exactly. Bulk decode is roughly 4× the incumbent, which is the per-section pass structure of
 limitation 1.
 
+**Every cost scales with the section count, so the real column is the more expensive one.** The
+planner picks 7 sections for `tweet_ids` against 5 for the generated snowflake, 4 for `increasing` and
+2 for `uniform` — and encode, decode and point access all track that. Worst case is `tweet_ids` at
+`block_size = 4096`, where 7 sections planned across 256 chunks costs **36 seconds** to encode a
+million rows. Anyone benchmarking encode throughput should lower `max_sections`, which trades ratio
+for time directly.
+
 Point access is the honest negative result, and it is worse than parity: `SIS_PLANNED` costs 53 ms
-against `PFOR`'s 8 ms, because every lookup decodes *all* sections rather than one stream.
-`UNCOMPRESSED` at 0.07 ms is the only thing here doing real random access. Bit-range splitting cannot
-help point workloads while the sub-schemes it delegates to have no random access of their own — see
-limitation 3.
+against `PFOR`'s 8 ms, and 70 ms on the real column with its 7 sections, because every lookup decodes
+*all* sections rather than one stream. `UNCOMPRESSED` at 0.07 ms is the only thing here doing real
+random access. Bit-range splitting cannot help point workloads while the sub-schemes it delegates to
+have no random access of their own — see limitation 3.
 
 ### Block size
 
