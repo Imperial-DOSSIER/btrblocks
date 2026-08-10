@@ -24,6 +24,32 @@ struct SchemeConfig {
     // in integer RLE, override the scheme used for run lengths with
     // this scheme instead of using the scheme picking algorithm
     IntegerSchemeType rle_force_counts_scheme{autoScheme()};
+    // ----------------------------------------------------------------------
+    // SubIntSplit
+    // ----------------------------------------------------------------------
+    struct {
+      // cost in bits charged for introducing an extra section, which is what
+      // stops the DP from splitting the value into many tiny sections whose
+      // individual savings do not pay for their per-section overhead
+      double split_penalty{10.0};
+      // hard cap on sections per value. Also bounds the encoded size: every
+      // section costs a full INTEGER per value before sub-compression, so an
+      // unbounded section count could outgrow the compression output buffer.
+      uint8_t max_sections{8};
+      // widest a single section may be. Sections are handed to the ordinary
+      // 32-bit scheme picker, so this can never exceed 32; it is narrowed to
+      // 31 at plan time when a sign-sensitive sub-scheme is enabled. See
+      // subintsplit::effectiveMaxSectionBits().
+      uint8_t max_section_bits{32};
+      // narrowest a single section may be
+      uint8_t min_section_bits{1};
+      // upper bound on values sampled when planning the split
+      uint32_t sample_size{2048};
+      // samples are drawn in contiguous blocks of this many values, so that
+      // locally-structured fields (e.g. a timestamp that only advances every
+      // few thousand rows) are visible to the run-length metrics
+      uint32_t sample_block_size{128};
+    } subintsplit;
   } integers;
   // ------------------------------------------------------------------------------
   struct {

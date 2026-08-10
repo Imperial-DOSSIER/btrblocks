@@ -110,6 +110,9 @@ TEST(RandomAccess, Begin) {
   schemes.enableAll();
   schemes.disable(IntegerSchemeType::TRUNCATION_8);
   schemes.disable(IntegerSchemeType::TRUNCATION_16);
+  // SUB_INT_SPLIT is registered but not yet implemented; re-enabled here once
+  // it can round-trip.
+  schemes.disable(IntegerSchemeType::SUB_INT_SPLIT);
   BtrBlocksConfig::get().integers.schemes = schemes;
   BtrBlocksConfig::get().doubles.schemes = defaultDoubleSchemes();
   BtrBlocksConfig::get().strings.schemes = defaultStringSchemes();

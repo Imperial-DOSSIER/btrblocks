@@ -9,6 +9,7 @@
 #include "scheme/integer/OneValue.hpp"
 #include "scheme/integer/PBP.hpp"
 #include "scheme/integer/RLE.hpp"
+#include "scheme/integer/SubIntSplit.hpp"
 #include "scheme/integer/Uncompressed.hpp"
 // legacy schemes
 #include "scheme/integer/FOR.hpp"
@@ -65,6 +66,7 @@ SchemesCollection::SchemesCollection() {
                  FBP,
                  PBP,
                  Frequency,
+                 SubIntSplit,
                  FOR,
                  PBP_DELTA,
                  Truncation8,

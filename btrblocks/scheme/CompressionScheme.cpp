@@ -112,6 +112,8 @@ string ConvertSchemeTypeToString(IntegerSchemeType type) {
       return "UNCOMPRESSED";
     case IntegerSchemeType::FOR:
       return "FOR";
+    case IntegerSchemeType::SUB_INT_SPLIT:
+      return "SUB_INT_SPLIT";
     default:
       throw Generic_Exception("Unknown IntegerSchemeType");
   }

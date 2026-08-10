@@ -16,6 +16,10 @@ enum class IntegerSchemeType : uint8_t {
   RLE = 3,
   PFOR = 4,
   BP = 5,
+  // Bit-range splitting: decomposes each value into contiguous bit-range
+  // sub-streams chosen by a sample-driven DP, each compressed independently by
+  // the ordinary scheme picker. Opt-in; not in defaultIntegerSchemes().
+  SUB_INT_SPLIT = 6,
   // legacy schemes
   FREQUENCY = 25,
   FOR = 26,
