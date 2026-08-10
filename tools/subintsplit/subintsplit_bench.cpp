@@ -67,6 +67,21 @@ double timeMedian(int repeats, const std::function<void()>& body) {
   return samples[samples.size() / 2];
 }
 // -------------------------------------------------------------------------------------
+// One row per section of a plan: where it sits, what compressed it, and what
+// it cost. The run-level CSV reports one total per encoding, which cannot say
+// whether a 41-bit timestamp dominates the output or some 3-bit field is being
+// wasteful.
+struct SectionRow {
+  uint32_t index{0};
+  uint8_t bit_start{0};
+  uint8_t bit_end{0};
+  std::string predicted;  // what the cost models expected to win here
+  std::string actual;     // what the picker chose
+  uint32_t bytes{0};
+  double bits_per_value{0.0};
+  double share_pct{0.0};  // share of the encoding this section accounts for
+};
+// -------------------------------------------------------------------------------------
 struct Result {
   std::string width;
   std::string dataset;
@@ -87,7 +102,60 @@ struct Result {
   double point_ms{0.0};
   uint32_t point_count{0};
   std::string plan;
+  // Populated only for SubIntSplit encodings.
+  double plan_ms{0.0};
+  bool raw_fallback{false};
+  std::vector<SectionRow> sections;
 };
+// -------------------------------------------------------------------------------------
+// Turns the encoder's report on the last chunk it compressed into rows.
+// No-ops for any codec that is not SubIntSplit, which leaves the report invalid.
+void collectSections(Result& result) {
+  const auto& report = subintsplit::lastPlanReport();
+  if (!report.valid) {
+    return;
+  }
+  result.plan_ms = report.plan_ms;
+  result.raw_fallback = report.raw_fallback;
+
+  uint32_t total = 0;
+  for (const auto& section : report.sections) {
+    total += section.bytes;
+  }
+  uint32_t index = 0;
+  for (const auto& section : report.sections) {
+    SectionRow row;
+    row.index = index++;
+    row.bit_start = section.bit_start;
+    row.bit_end = section.bit_end;
+    // With forced boundaries the planner never ran, so there is no prediction to
+    // report. Emitting the default-constructed enum would look like a wrong
+    // prediction and skew any accuracy figure computed from this file.
+    row.predicted = report.forced_boundaries ? "-" : ConvertSchemeTypeToString(section.predicted);
+    row.actual = ConvertSchemeTypeToString(section.actual);
+    row.bytes = section.bytes;
+    row.bits_per_value = report.tuple_count > 0 ? (8.0 * section.bytes) / report.tuple_count : 0.0;
+    row.share_pct = total > 0 ? (100.0 * section.bytes) / total : 0.0;
+    result.sections.push_back(row);
+  }
+}
+// -------------------------------------------------------------------------------------
+void writeSectionsHeader(std::ostream& out) {
+  out << "width,dataset,codec,block_size,rows,section,bit_start,bit_end,bits,predicted,actual,"
+         "bytes,bits_per_value,share_pct,plan_ms,raw_fallback\n";
+}
+// -------------------------------------------------------------------------------------
+void writeSectionRows(std::ostream& out, const Result& r) {
+  for (const auto& s : r.sections) {
+    out << r.width << ',' << r.dataset << ',' << r.codec << ',' << r.block_size << ',' << r.rows
+        << ',' << s.index << ',' << static_cast<int>(s.bit_start) << ','
+        << static_cast<int>(s.bit_end) << ',' << (s.bit_end - s.bit_start + 1) << ',' << s.predicted
+        << ',' << s.actual << ',' << s.bytes << ',' << s.bits_per_value << ',' << s.share_pct
+        << ','
+        // Repeated per row so it survives a naive group-by.
+        << r.plan_ms << ',' << (r.raw_fallback ? 1 : 0) << '\n';
+  }
+}
 // -------------------------------------------------------------------------------------
 std::string csvEscape(const std::string& text) {
   std::string out = "\"";
@@ -224,6 +292,22 @@ Result run32(const std::string& dataset_name,
   result.encoded_bytes = encoded_bytes;
   result.ratio = static_cast<double>(data.size() * sizeof(INTEGER)) /
                  static_cast<double>(std::max<uint64_t>(encoded_bytes, 1));
+
+  // ---- section breakdown --------------------------------------------------------
+  // One more compress of chunk 0, outside the timed loop. Each chunk overwrites
+  // the encoder's report, so without this the sections would describe the last
+  // chunk while the plan column describes the first.
+  {
+    subintsplit::lastPlanReport().valid = false;
+    ScopedBoundaries boundaries(codec.forced_boundaries, 32);
+    if (!codec.automatic) {
+      BtrBlocksConfig::get().integers.override_scheme = codec.scheme;
+    }
+    auto input_chunk = relation.getInputChunk(ranges[0], 0, 0);
+    Datablock::compress(input_chunk);
+    BtrBlocksConfig::get().integers.override_scheme = static_cast<IntegerSchemeType>(autoScheme());
+    collectSections(result);
+  }
 
   // ---- assemble a column part so the read path is the real one ------------------
   ColumnPart part;
@@ -366,6 +450,16 @@ Result run64(const std::string& dataset_name,
                  static_cast<double>(std::max<uint64_t>(encoded_bytes, 1));
   if (!raw) {
     result.plan = integers::SubIntSplit64::fullDescription(compressed[0].data());
+
+    // As in the 32-bit arm: one more compress of chunk 0 outside timing, so the
+    // sections describe the same chunk the plan column does.
+    subintsplit::lastPlanReport().valid = false;
+    ScopedBoundaries boundaries(codec.forced_boundaries, 64);
+    std::vector<u8> scratch(integers::SubIntSplit64::maxCompressedSize(chunk_ranges[0].count));
+    integers::SubIntSplit64::compress(data.data() + chunk_ranges[0].start, nullptr, scratch.data(),
+                                      chunk_ranges[0].count,
+                                      BtrBlocksConfig::get().integers.max_cascade_depth);
+    collectSections(result);
   } else {
     result.plan = "RAW64";
   }
@@ -533,6 +627,7 @@ int main(int argc, char** argv) {
   int repeats = 5;
   uint32_t seed = 42;
   std::string csv_path;
+  std::string sections_csv_path;
   std::string input_i64;
 
   for (int i = 1; i < argc; i++) {
@@ -550,13 +645,20 @@ int main(int argc, char** argv) {
       csv_path = next();
     } else if (arg == "--input-i64") {
       input_i64 = next();
+    } else if (arg == "--sections-csv") {
+      sections_csv_path = next();
     } else if (arg == "--help") {
-      std::cout << "usage: subintsplit_bench [--rows N] [--block-sizes a,b,c] [--repeats N]"
-                   " [--seed N] [--csv PATH] [--input-i64 PATH]\n"
+      std::cout << "usage: subintsplit_bench [--rows N] [--block-sizes a,b,c] [--repeats N]\n"
+                   "                         [--seed N] [--csv PATH] [--input-i64 PATH]\n"
+                   "                         [--sections-csv PATH]\n"
                    "\n"
-                   "  --input-i64 PATH  add a 64-bit dataset read from a flat little-endian\n"
-                   "                    int64 file, for measuring against real data rather\n"
-                   "                    than generated. Produce one with parquet_to_i64.py.\n";
+                   "  --input-i64 PATH     add a 64-bit dataset read from a flat little-endian\n"
+                   "                       int64 file, for measuring against real data rather\n"
+                   "                       than generated. Produce one with parquet_to_i64.py.\n"
+                   "\n"
+                   "  --sections-csv PATH  write one row per section of each SubIntSplit plan:\n"
+                   "                       bit range, the scheme the planner predicted, the\n"
+                   "                       scheme actually chosen, and the bytes it cost.\n";
       return 0;
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
@@ -635,20 +737,39 @@ int main(int argc, char** argv) {
   std::ostream& csv = csv_path.empty() ? std::cout : file;
   writeCsvHeader(csv);
 
+  std::ofstream sections_file;
+  if (!sections_csv_path.empty()) {
+    sections_file.open(sections_csv_path);
+    if (!sections_file.good()) {
+      std::cerr << "cannot open " << sections_csv_path << "\n";
+      return 1;
+    }
+    writeSectionsHeader(sections_file);
+  }
+  const auto emit = [&](const Result& result) {
+    writeCsvRow(csv, result);
+    if (sections_file.is_open()) {
+      writeSectionRows(sections_file, result);
+    }
+  };
+
   for (const auto block_size : block_sizes) {
     for (const auto& dataset : datasets32) {
       for (const auto& codec : codecs32) {
         std::cerr << "32/" << dataset.name << "/" << codec.name << " @" << block_size << "\n";
-        writeCsvRow(csv, run32(dataset.name, dataset.data, codec, block_size, repeats));
+        emit(run32(dataset.name, dataset.data, codec, block_size, repeats));
       }
     }
     for (const auto& dataset : datasets64) {
       for (const auto& codec : codecs64) {
         std::cerr << "64/" << dataset.name << "/" << codec.name << " @" << block_size << "\n";
-        writeCsvRow(csv, run64(dataset.name, dataset.data, codec, block_size, repeats));
+        emit(run64(dataset.name, dataset.data, codec, block_size, repeats));
       }
     }
     csv.flush();
+    if (sections_file.is_open()) {
+      sections_file.flush();
+    }
   }
 
   return 0;

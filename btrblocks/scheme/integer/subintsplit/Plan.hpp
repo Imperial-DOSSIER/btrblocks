@@ -33,6 +33,50 @@ struct SplitPlan {
   double totalCost{0.0};
 };
 // -------------------------------------------------------------------------------------
+// What the last encode chose, for diagnostics.
+//
+// Three things here cannot be recovered from the encoded bytes afterwards. A
+// section's size is not in the header -- descriptors carry offsets but no
+// total, so a reader cannot determine the final section's length. The scheme
+// the planner *predicted* is discarded once the picker has made its own
+// choice. And the time spent planning is not a property of the output at all.
+//
+// Kept out of the wire format deliberately: this is diagnostic, and paying
+// header bytes on every column to answer questions only a benchmark asks would
+// be the wrong trade.
+struct SectionReport {
+  u8 bit_start{0};
+  u8 bit_end{0};
+  // What the cost models expected to win for this range...
+  IntegerSchemeType predicted{IntegerSchemeType::UNCOMPRESSED};
+  // ...against what the picker actually chose. Divergence is the signal that
+  // the cost models are mis-modelling something.
+  IntegerSchemeType actual{IntegerSchemeType::UNCOMPRESSED};
+  u32 bytes{0};
+};
+// -------------------------------------------------------------------------------------
+struct PlanReport {
+  bool valid{false};
+  bool raw_fallback{false};
+  // Boundaries came from an override rather than the planner, so the per-section
+  // `predicted` fields hold no prediction and must not be read as one.
+  bool forced_boundaries{false};
+  u8 value_bits{0};
+  u32 tuple_count{0};
+  u32 total_bytes{0};
+  // Sampling plus the dynamic program, excluding section compression. Encode
+  // cost is dominated by one or the other, and the totals alone cannot say which.
+  double plan_ms{0.0};
+  std::vector<SectionReport> sections;
+};
+// -------------------------------------------------------------------------------------
+// The most recent encode on this thread. Overwritten per chunk, so read it
+// immediately after the compress whose plan you want.
+inline PlanReport& lastPlanReport() {
+  static thread_local PlanReport report;
+  return report;
+}
+// -------------------------------------------------------------------------------------
 // Widest section the sub-scheme pool can safely handle.
 //
 // A section is handed to the ordinary integer scheme picker as INTEGER, so 32

@@ -11,6 +11,7 @@
 #include "scheme/integer/subintsplit/Sampler.hpp"
 #include "scheme/integer/subintsplit/Selector.hpp"
 // -------------------------------------------------------------------------------------
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <type_traits>
@@ -80,6 +81,7 @@ struct NestedCompressionScope {
   NestedCompressionScope& operator=(const NestedCompressionScope&) = delete;
 };
 // -------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
 template <typename UT>
 class SubIntSplitCore {
  public:
@@ -94,6 +96,19 @@ class SubIntSplitCore {
                     u8* dest,
                     u32 tuple_count,
                     u8 allowed_cascading_level) {
+    // Estimation compresses a 640-value sample, and the picker runs one *after*
+    // the real compress purely to log a ratio. Recording those would leave the
+    // report describing a sample rather than the column, so only real
+    // compressions are recorded. estimation_level is non-zero throughout any
+    // estimation, since expectedCompressionRatio increments it in its condition.
+    const bool record = ThreadCache::get().estimation_level == 0;
+    auto& report = lastPlanReport();
+    if (record) {
+      report = PlanReport{};
+      report.value_bits = static_cast<u8>(kValueBits);
+      report.tuple_count = tuple_count;
+    }
+
     auto& header = *reinterpret_cast<SubIntSplitHeader*>(dest);
     header.format_version = kFormatVersion;
     header.value_bits = static_cast<u8>(kValueBits);
@@ -107,10 +122,23 @@ class SubIntSplitCore {
       descriptor.scheme_code = kRawSectionScheme;
       descriptor.padding = 0;
       descriptor.offset = 0;
+      if (record) {
+        report.raw_fallback = true;
+        report.total_bytes = sizeof(SubIntSplitHeader) + sizeof(SectionDescriptor);
+        report.valid = true;
+      }
       return sizeof(SubIntSplitHeader) + sizeof(SectionDescriptor);
     }
 
+    const auto plan_start = std::chrono::steady_clock::now();
+    const auto* forced = forcedSplitBoundaries();
     const auto segments = planSplit(src, nullmap, tuple_count);
+    if (record) {
+      report.forced_boundaries = forced != nullptr && !forced->empty();
+      report.plan_ms =
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start)
+              .count();
+    }
     const auto section_count = static_cast<u8>(segments.size());
 
     const u32 header_size = sizeof(SubIntSplitHeader) + section_count * sizeof(SectionDescriptor);
@@ -164,12 +192,33 @@ class SubIntSplitCore {
       descriptor.scheme_code = scheme_code;
       written += used;
 
+      if (record) {
+        SectionReport entry;
+        entry.bit_start = descriptor.bit_start;
+        entry.bit_end = descriptor.bit_end;
+        entry.predicted = segment.predictedScheme;
+        entry.actual = static_cast<IntegerSchemeType>(scheme_code);
+        entry.bytes = used;
+        report.sections.push_back(entry);
+      }
+
       if (written > raw_size) {
-        return encodeRaw(dest, src, tuple_count);
+        const u32 raw_bytes = encodeRaw(dest, src, tuple_count);
+        if (record) {
+          report.raw_fallback = true;
+          report.sections.clear();
+          report.total_bytes = raw_bytes;
+          report.valid = true;
+        }
+        return raw_bytes;
       }
     }
 
     header.section_count = section_count;
+    if (record) {
+      report.total_bytes = header_size + written;
+      report.valid = true;
+    }
     return header_size + written;
   }
 

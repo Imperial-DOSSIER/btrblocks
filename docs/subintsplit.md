@@ -314,6 +314,48 @@ Boundary 18 rather than 17 is not really an error. `datacenter` holds only five 
 1–13, so bit 21 is almost never set and the entropy boundary genuinely sits a bit above the schema
 boundary.
 
+### Where the bytes actually go
+
+`--sections-csv` reports one row per section: its bit range, the scheme the planner predicted, the
+scheme the picker actually chose, and what it cost. The run-level CSV gives one total per encoding,
+which cannot say whether a wide field dominates the output or a narrow one is being wasteful.
+
+For `tweet_ids` at `block_size = 65536`:
+
+| Section | Bits | Scheme | bits/value | Share |
+|---|---|---|---|---|
+| 0–2 | 3 | `BP` | 2.80 | 6.9% |
+| 3–11 | 9 | `BP` | 0.83 | 2.0% |
+| 12–17 | 6 | `BP` | 6.14 | 15.2% |
+| 18–21 | 4 | `RLE` | 0.43 | 1.1% |
+| **22–50** | **29** | **`BP`** | **28.93** | **71.4%** |
+| 51–55 | 5 | `RLE` | 1.24 | 3.1% |
+| 56–63 | 8 | `RLE` | 0.13 | 0.3% |
+
+**One section is 71% of the output, and it is incompressible.** The low 29 bits of the timestamp cost
+28.93 bits per value out of 29 — essentially pure entropy, exactly as the sampling density in
+*Datasets* predicts. That single row explains the whole 1.55× ceiling on real data, and it says the
+ceiling is a property of the data rather than something better cost models or more sections could
+lift. The other six sections together are already compressed to about 10.6 bits for 35 bits of field.
+
+**Planning, not compression, dominates encode time.** The report times the sampler and the DP
+separately: 459 ms of a 65536-row chunk's encode, against roughly 854 ms total — over half. That is
+the concrete answer to limitation 4, and it points at `sample_size` and `max_sections` as the knobs
+that matter. Forced-boundary runs report 0 ms, which is the expected self-check: they bypass the
+planner entirely.
+
+**The planner's predictions agree with the picker 84% of the time** (26 of 31 planner-chosen
+sections). The disagreements are not random — the dominant one is `BP` predicted where `DICT` won, on
+low-cardinality ranges worth 54–94% of their encodings. The dictionary cost model is too pessimistic,
+which is a concrete lead for improving the models rather than a vague suspicion. Sections whose
+boundaries were forced report `-` rather than a prediction, since the planner never ran for them and
+counting them would flatter the figure.
+
+*Caveat:* per-section byte counts come from one chunk and vary slightly between runs, because
+BtrBlocks' scheme selection samples with a `std::random_device` seed (`NumberStats::samples`).
+Repeated identical invocations differ by around 2% in total encoded size, so these figures indicate
+proportions rather than exact byte counts.
+
 ### Speed
 
 Snowflake, `block_size = 65536`, milliseconds. Gather is 4096 clustered positions; point access is
@@ -445,8 +487,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j --target subintsplit_bench    # explicit target: the playground
                                                      # tools pull in the AWS SDK
 ./build/subintsplit_bench --rows 1048576 --block-sizes 4096,8192,65536 --repeats 5 \
-                          --input-i64 build/tweet_ids.i64 --csv results.csv
+                          --input-i64 build/tweet_ids.i64 --csv results.csv \
+                          --sections-csv sections.csv
 ```
+
+`--sections-csv` is what produced *Where the bytes actually go*: one row per section of each
+SubIntSplit plan, with its bit range, predicted and actual scheme, byte cost and share of the
+encoding. Omit it and nothing else changes.
 
 Three datasets are generated in memory from a seed — snowflake, uniformly random, and slowly
 increasing. Uniform data is a control: it has no bit-range structure, so a split cannot help, and
@@ -501,3 +548,4 @@ scheme, which is what keeps the random-access API honest as a cross-codec baseli
 | `tools/subintsplit/parquet_to_i64.py` | One-off Parquet → flat int64 conversion for the real dataset |
 | `docs/subintsplit-porting.md` | Deviations from the Nimble original |
 | `docs/subintsplit-results.csv` | Raw output behind the tables above |
+| `docs/subintsplit-sections.csv` | Per-section breakdown of each plan |
