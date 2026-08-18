@@ -29,10 +29,10 @@ class SubIntSplit : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
-  // Skips the accumulation work for unwanted rows, but each section is still
-  // decoded in full: BtrBlocks sub-schemes have no range or offset decode, so
-  // this is a constant-factor win over decompress() rather than real random
-  // access. See docs/subintsplit.md.
+  // Delegates per-section to each section's own scheme.gather() (see
+  // SubIntSplitCore::gather), so random access is exactly as good as the
+  // composition of its sections' own schemes -- not a fixed constant-factor
+  // win over decompress() anymore. See docs/subintsplit.md.
   void gather(INTEGER* dest,
               const u8* src,
               BitmapWrapper* nullmap,
