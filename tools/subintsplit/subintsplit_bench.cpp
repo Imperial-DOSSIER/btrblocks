@@ -198,6 +198,17 @@ struct Codec {
   bool exclude_subintsplit{false};
 };
 // -------------------------------------------------------------------------------------
+// Same shape as Codec, for Integer64SchemeType. A separate struct rather than
+// a template: the two enums are unrelated types and every call site already
+// knows which width it is dealing with.
+struct Codec64 {
+  std::string name;
+  Integer64SchemeType scheme{Integer64SchemeType::UNCOMPRESSED};
+  bool automatic{false};
+  std::string forced_boundaries;
+  bool exclude_subintsplit{false};
+};
+// -------------------------------------------------------------------------------------
 // Removes SubIntSplit from the enabled set for the duration of a scope.
 class ScopedSchemeSet {
  public:
@@ -219,6 +230,30 @@ class ScopedSchemeSet {
 
  private:
   IntegerSchemeSet saved_;
+  bool active_{false};
+};
+// -------------------------------------------------------------------------------------
+// Same as ScopedSchemeSet, for the 64-bit scheme set.
+class ScopedSchemeSet64 {
+ public:
+  explicit ScopedSchemeSet64(bool exclude_subintsplit)
+      : saved_(BtrBlocksConfig::get().integers64.schemes) {
+    if (!exclude_subintsplit) {
+      return;
+    }
+    active_ = true;
+    BtrBlocksConfig::get().integers64.schemes.disable(Integer64SchemeType::SUB_INT_SPLIT);
+    SchemePool::refresh();
+  }
+  ~ScopedSchemeSet64() {
+    if (active_) {
+      BtrBlocksConfig::get().integers64.schemes = saved_;
+      SchemePool::refresh();
+    }
+  }
+
+ private:
+  Integer64SchemeSet saved_;
   bool active_{false};
 };
 // -------------------------------------------------------------------------------------
@@ -393,11 +428,17 @@ Result run32(const std::string& dataset_name,
 // -------------------------------------------------------------------------------------
 // ---------------------------- 64-bit arm ----------------------------------------------
 // -------------------------------------------------------------------------------------
-// Chunked by hand into block_size pieces, mirroring what Relation does for the
-// 32-bit arm so the two are comparable.
+// Mirrors run32() exactly: a real Relation with a BIGINT column, compressed
+// chunk-by-chunk through Datablock::compress (which dispatches on
+// ColumnType::BIGINT into the registered Integer64Scheme pool), assembled
+// into a ColumnPart, written to disk and read back through BtrReader. Now
+// that BIGINT is a real column type with a real gatherColumn64/lookupColumn64
+// path, there is no reason for the 64-bit arm to hand-chunk or call scheme
+// methods directly the way it used to -- doing so measured a synthetic path
+// that skipped BtrReader's chunk bucketing and metadata entirely.
 Result run64(const std::string& dataset_name,
              const std::vector<s64>& data,
-             const Codec& codec,
+             const Codec64& codec,
              uint32_t block_size,
              int repeats) {
   Result result;
@@ -407,44 +448,35 @@ Result run64(const std::string& dataset_name,
   result.rows = static_cast<uint32_t>(data.size());
   result.block_size = block_size;
 
-  const bool raw = codec.name == "RAW64";
+  BtrBlocksConfig::get().block_size = block_size;
+  ScopedSchemeSet64 scheme_set(codec.exclude_subintsplit);
 
-  struct ChunkRange {
-    uint32_t start;
-    uint32_t count;
-  };
-  std::vector<ChunkRange> chunk_ranges;
-  for (uint32_t offset = 0; offset < data.size(); offset += block_size) {
-    chunk_ranges.push_back(
-        {offset, std::min<uint32_t>(block_size, static_cast<uint32_t>(data.size()) - offset)});
+  Relation relation;
+  {
+    Vector<BIGINT> column(static_cast<u64>(data.size()));
+    for (std::size_t i = 0; i < data.size(); i++) {
+      column[i] = data[i];
+    }
+    relation.addColumn({"ids", std::move(column)});
   }
-  result.chunks = static_cast<uint32_t>(chunk_ranges.size());
+  const auto ranges = relation.getRanges(SplitStrategy::SEQUENTIAL, 999999);
+  result.chunks = static_cast<uint32_t>(ranges.size());
 
-  // SubIntSplit64 is now a registered Integer64Scheme (instance methods,
-  // stats-driven compress()) rather than a free-standing static-method
-  // class; one instance is reused across chunks/calls the same way the
-  // 32-bit arm reuses whichever IntegerScheme the picker handed back.
-  integers::SubIntSplit64 scheme;
-
-  std::vector<std::vector<u8>> compressed(chunk_ranges.size());
+  // ---- encode -------------------------------------------------------------------
+  std::vector<std::vector<u8>> compressed(ranges.size());
   const auto compressAll = [&]() {
     ScopedBoundaries boundaries(codec.forced_boundaries, 64);
-    for (std::size_t chunk_i = 0; chunk_i < chunk_ranges.size(); chunk_i++) {
-      const auto& range = chunk_ranges[chunk_i];
-      if (raw) {
-        compressed[chunk_i].resize(static_cast<std::size_t>(range.count) * sizeof(s64));
-        std::memcpy(compressed[chunk_i].data(), data.data() + range.start,
-                    compressed[chunk_i].size());
-        continue;
+    for (std::size_t chunk_i = 0; chunk_i < ranges.size(); chunk_i++) {
+      // The override is consumed by the first compress that sees it, so it has
+      // to be re-armed for every chunk.
+      if (!codec.automatic) {
+        BtrBlocksConfig::get().integers64.override_scheme = codec.scheme;
       }
-      std::vector<u8> buffer(integers::SubIntSplit64::maxCompressedSize(range.count));
-      SInteger64Stats stats =
-          SInteger64Stats::generateStats(data.data() + range.start, nullptr, range.count);
-      const u32 size = scheme.compress(data.data() + range.start, nullptr, buffer.data(), stats,
-                                       BtrBlocksConfig::get().integers.max_cascade_depth);
-      buffer.resize(size);
-      compressed[chunk_i] = std::move(buffer);
+      auto input_chunk = relation.getInputChunk(ranges[chunk_i], chunk_i, 0);
+      compressed[chunk_i] = Datablock::compress(input_chunk);
     }
+    BtrBlocksConfig::get().integers64.override_scheme =
+        static_cast<Integer64SchemeType>(autoScheme());
   };
   result.encode_ms = timeMedian(repeats, compressAll);
 
@@ -455,35 +487,50 @@ Result run64(const std::string& dataset_name,
   result.encoded_bytes = encoded_bytes;
   result.ratio = static_cast<double>(data.size() * sizeof(s64)) /
                  static_cast<double>(std::max<uint64_t>(encoded_bytes, 1));
-  if (!raw) {
-    result.plan = scheme.fullDescription(compressed[0].data());
 
-    // As in the 32-bit arm: one more compress of chunk 0 outside timing, so the
-    // sections describe the same chunk the plan column does.
+  // ---- section breakdown --------------------------------------------------------
+  // One more compress of chunk 0, outside the timed loop, same reasoning as run32().
+  {
     subintsplit::lastPlanReport().valid = false;
     ScopedBoundaries boundaries(codec.forced_boundaries, 64);
-    std::vector<u8> scratch(integers::SubIntSplit64::maxCompressedSize(chunk_ranges[0].count));
-    SInteger64Stats scratch_stats = SInteger64Stats::generateStats(
-        data.data() + chunk_ranges[0].start, nullptr, chunk_ranges[0].count);
-    scheme.compress(data.data() + chunk_ranges[0].start, nullptr, scratch.data(), scratch_stats,
-                    BtrBlocksConfig::get().integers.max_cascade_depth);
+    if (!codec.automatic) {
+      BtrBlocksConfig::get().integers64.override_scheme = codec.scheme;
+    }
+    auto input_chunk = relation.getInputChunk(ranges[0], 0, 0);
+    Datablock::compress(input_chunk);
+    BtrBlocksConfig::get().integers64.override_scheme =
+        static_cast<Integer64SchemeType>(autoScheme());
     collectSections(result);
-  } else {
-    result.plan = "RAW64";
+  }
+
+  // ---- assemble a column part so the read path is the real one ------------------
+  ColumnPart part;
+  for (auto& chunk : compressed) {
+    part.addCompressedChunk(std::move(chunk));
+  }
+  const std::string path = "subintsplit_bench_column64.btr";
+  part.writeToDisk(path);
+
+  std::vector<char> file_contents;
+  Utils::readFileToMemory(path, file_contents);
+  BtrReader reader(file_contents.data());
+
+  {
+    std::vector<u8> scratch;
+    reader.readColumn(scratch, 0);
+    result.plan = reader.getSchemeDescription(0);
   }
 
   // ---- bulk decode --------------------------------------------------------------
-  std::vector<s64> decoded(data.size() + 64);
+  std::vector<s64> decoded(data.size());
   const auto decodeAll = [&]() {
-    for (std::size_t chunk_i = 0; chunk_i < chunk_ranges.size(); chunk_i++) {
-      const auto& range = chunk_ranges[chunk_i];
-      if (raw) {
-        std::memcpy(decoded.data() + range.start, compressed[chunk_i].data(),
-                    static_cast<std::size_t>(range.count) * sizeof(s64));
-      } else {
-        scheme.decompress(decoded.data() + range.start, nullptr, compressed[chunk_i].data(),
-                          range.count, 0);
-      }
+    std::size_t offset = 0;
+    std::vector<u8> scratch;
+    for (u32 chunk_i = 0; chunk_i < reader.getChunkCount(); chunk_i++) {
+      reader.readColumn(scratch, chunk_i);
+      const auto tuple_count = reader.getTupleCount(chunk_i);
+      std::memcpy(decoded.data() + offset, scratch.data(), tuple_count * sizeof(s64));
+      offset += tuple_count;
     }
   };
   result.decode_ms = timeMedian(repeats, decodeAll);
@@ -495,53 +542,20 @@ Result run64(const std::string& dataset_name,
     }
   }
 
-  // ---- gather, bucketed by chunk exactly as BtrReader::gatherColumn does ---------
+  // ---- gather -------------------------------------------------------------------
   const auto measureGather = [&](const std::vector<uint32_t>& positions, double& ms,
                                  uint32_t& chunks_touched, uint32_t& rows) {
     if (positions.empty()) {
       return;
     }
     rows = static_cast<uint32_t>(positions.size());
-
-    std::vector<std::vector<uint32_t>> local(chunk_ranges.size());
-    std::vector<std::vector<uint32_t>> slots(chunk_ranges.size());
-    for (std::size_t i = 0; i < positions.size(); i++) {
-      const auto chunk_i = positions[i] / block_size;
-      local[chunk_i].push_back(positions[i] - chunk_ranges[chunk_i].start);
-      slots[chunk_i].push_back(static_cast<uint32_t>(i));
-    }
-    uint32_t touched = 0;
-    for (const auto& entry : local) {
-      if (!entry.empty()) {
-        touched++;
-      }
-    }
-    chunks_touched = touched;
-
     std::vector<s64> gathered(positions.size());
+    u32 touched = 0;
     ms = timeMedian(repeats, [&]() {
-      std::vector<s64> chunk_result;
-      for (std::size_t chunk_i = 0; chunk_i < chunk_ranges.size(); chunk_i++) {
-        if (local[chunk_i].empty()) {
-          continue;
-        }
-        chunk_result.resize(local[chunk_i].size());
-        if (raw) {
-          const auto* values = reinterpret_cast<const s64*>(compressed[chunk_i].data());
-          for (std::size_t j = 0; j < local[chunk_i].size(); j++) {
-            chunk_result[j] = values[local[chunk_i][j]];
-          }
-        } else {
-          scheme.gather(chunk_result.data(), compressed[chunk_i].data(), nullptr,
-                       chunk_ranges[chunk_i].count, local[chunk_i].data(),
-                       static_cast<u32>(local[chunk_i].size()), 0);
-        }
-        for (std::size_t j = 0; j < local[chunk_i].size(); j++) {
-          gathered[slots[chunk_i][j]] = chunk_result[j];
-        }
-      }
+      reader.gatherColumn64(gathered.data(), positions.data(),
+                            static_cast<u32>(positions.size()), &touched);
     });
-
+    chunks_touched = touched;
     for (std::size_t i = 0; i < positions.size(); i++) {
       if (gathered[i] != data[positions[i]]) {
         throw Generic_Exception("gather mismatch for codec " + codec.name);
@@ -552,6 +566,8 @@ Result run64(const std::string& dataset_name,
   const auto rows64 = static_cast<uint32_t>(data.size());
   measureGather(uniformTrace(rows64, 4096, 7), result.gather_uniform_ms,
                 result.gather_uniform_chunks, result.gather_uniform_rows);
+  // Low selectivity with long runs, so whole chunks go untouched -- the regime
+  // where chunk locality is visible at all.
   measureGather(clusteredTrace(rows64, 0.01, 64.0, 11), result.gather_clustered_ms,
                 result.gather_clustered_chunks, result.gather_clustered_rows);
 
@@ -560,20 +576,12 @@ Result run64(const std::string& dataset_name,
   result.point_count = static_cast<uint32_t>(point_positions.size());
   result.point_ms = timeMedian(repeats, [&]() {
     for (const auto position : point_positions) {
-      const auto chunk_i = position / block_size;
-      const auto local = position - chunk_ranges[chunk_i].start;
-      s64 value = 0;
-      if (raw) {
-        value = reinterpret_cast<const s64*>(compressed[chunk_i].data())[local];
-      } else {
-        value = scheme.lookupAt(compressed[chunk_i].data(), nullptr, chunk_ranges[chunk_i].count,
-                                local, 0);
-      }
-      volatile s64 sink = value;
-      (void)sink;
+      volatile s64 value = reader.lookupColumn64(position);
+      (void)value;
     }
   });
 
+  std::remove(path.c_str());
   return result;
 }
 // -------------------------------------------------------------------------------------
@@ -677,6 +685,12 @@ int main(int argc, char** argv) {
   BtrBlocksConfig::configure([](BtrBlocksConfig& config) {
     config.integers.schemes = defaultIntegerSchemes();
     config.integers.schemes.enable(IntegerSchemeType::SUB_INT_SPLIT);
+    config.integers64.schemes = defaultInteger64Schemes();
+    config.integers64.schemes.enable(Integer64SchemeType::SUB_INT_SPLIT);
+    // FOR64 is a legacy scheme excluded from defaultInteger64Schemes() (like
+    // its 32-bit counterpart), but the FOR64 codec below forces it directly,
+    // so it has to be in the pool for the override to find.
+    config.integers64.schemes.enable(Integer64SchemeType::FOR);
   });
 
   // The incumbent codecs, then SubIntSplit with the planner's split and with
@@ -694,10 +708,25 @@ int main(int argc, char** argv) {
       {"SIS_HALVES", IntegerSchemeType::SUB_INT_SPLIT, false, "0-15;16-31"},
       {"SIS_PLANNED", IntegerSchemeType::SUB_INT_SPLIT, false, ""},
   };
-  const std::vector<Codec> codecs64{
-      {"RAW64", IntegerSchemeType::UNCOMPRESSED, false, ""},
-      {"SIS64_HALVES", IntegerSchemeType::SUB_INT_SPLIT, false, "0-31;32-63"},
-      {"SIS64_PLANNED", IntegerSchemeType::SUB_INT_SPLIT, false, ""},
+  // The incumbent 64-bit codecs (now real registered Integer64Schemes, not a
+  // free-standing bolt-on -- see scheme/CompressionScheme64.hpp), then
+  // SubIntSplit with the planner's split and with the fixed halves split.
+  // UNCOMPRESSED64 is the baseline every other arm should beat on ratio;
+  // BP64/FOR64/RLE64/DICT64 are what SIS64_PLANNED's point-access story
+  // actually needs to be competitive with, matching the spirit of what
+  // codecs32 compares SubIntSplit against.
+  const std::vector<Codec64> codecs64{
+      {"UNCOMPRESSED64", Integer64SchemeType::UNCOMPRESSED, false, ""},
+      {"BP64", Integer64SchemeType::BP, false, ""},
+      {"FOR64", Integer64SchemeType::FOR, false, ""},
+      {"RLE64", Integer64SchemeType::RLE, false, ""},
+      {"DICT64", Integer64SchemeType::DICT, false, ""},
+      // What BtrBlocks does today, with SubIntSplit out of the pool.
+      {"AUTO_BASELINE64", Integer64SchemeType::UNCOMPRESSED, true, "", true},
+      // And with it in, which also shows whether the picker actually selects it.
+      {"AUTO_WITH_SIS64", Integer64SchemeType::UNCOMPRESSED, true, ""},
+      {"SIS64_HALVES", Integer64SchemeType::SUB_INT_SPLIT, false, "0-31;32-63"},
+      {"SIS64_PLANNED", Integer64SchemeType::SUB_INT_SPLIT, false, ""},
   };
 
   struct Dataset32 {
