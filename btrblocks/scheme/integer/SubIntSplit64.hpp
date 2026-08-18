@@ -8,11 +8,10 @@ namespace btrblocks::integers {
 // -------------------------------------------------------------------------------------
 // SubIntSplit for 64-bit columns.
 //
-// BtrBlocks is 32-bit throughout -- INTEGER is s32, the stats, the picker, the
-// scheme interface and the storage layer all follow, and ColumnType::BIGINT is
-// marked out of scope -- so there is no 64-bit scheme hierarchy for this to
-// join. It is therefore free-standing, in the manner of FBP64, and is driven
-// directly rather than selected by the picker.
+// TODO(64-7): promote this to a registered Integer64Scheme subclass now that
+// Integer64Scheme/Integer64SchemeType exist (see scheme/CompressionScheme64.hpp)
+// -- it is currently still free-standing and driven directly rather than
+// selected by the picker; this comment predates that scaffolding.
 //
 // That costs less than it sounds. Sections are capped at 32 bits, so once a
 // value is decomposed each section is an ordinary INTEGER stream and the whole

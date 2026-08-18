@@ -251,37 +251,5 @@ INTEGER EXP_FBP::lookup(u32) {
   UNREACHABLE();
 }
 // -------------------------------------------------------------------------------------
-u32 FBP64::compress(u64* src, u8* dest, u32 tuple_count) {
-  auto& col_struct = *reinterpret_cast<XPBPStructure*>(dest);
-  // -------------------------------------------------------------------------------------
-  FPFor fast_pfor;
-  size_t compressed_codes_size = tuple_count * 2 + 1024;  // not really used
-  // -------------------------------------------------------------------------------------
-  auto dest_integer = reinterpret_cast<u64>(col_struct.data);
-  u64 padding = dest_integer;
-  dest_integer = (dest_integer + 3) & ~3ul;
-  col_struct.padding = dest_integer - padding;
-  auto dest_4_aligned = reinterpret_cast<u32*>(dest_integer);
-  // -------------------------------------------------------------------------------------
-  fast_pfor.compress(reinterpret_cast<const u32*>(src), tuple_count, dest_4_aligned,
-                     compressed_codes_size);
-  col_struct.u32_count = compressed_codes_size;
-  // -------------------------------------------------------------------------------------
-  return sizeof(XPBPStructure) + compressed_codes_size * sizeof(u32);
-}
-void FBP64::decompress(u8* dest, const u8* src, u32 tuple_count, u32 level) {
-  auto& col_struct = *reinterpret_cast<const XPBPStructure*>(src);
-  // -------------------------------------------------------------------------------------
-  FPFor codec;
-
-  SIZE decompressed_codes_size = tuple_count;
-  auto encoded_array =
-      const_cast<u32*>(reinterpret_cast<const u32*>(col_struct.data + col_struct.padding));
-  if (codec.decompress(encoded_array, col_struct.u32_count, reinterpret_cast<u32*>(dest),
-                       decompressed_codes_size) != encoded_array + col_struct.u32_count) {
-    throw Generic_Exception("Decompressing XPBP failed");
-  }
-}
-// -------------------------------------------------------------------------------------
 }  // namespace btrblocks::integers
 // -------------------------------------------------------------------------------------

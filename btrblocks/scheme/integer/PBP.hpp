@@ -108,11 +108,5 @@ class EXP_FBP : public IntegerScheme {
   INTEGER lookup(u32) override;
   void scan(Predicate, BITMAP*, const u8*, u32) override;
 };
-// -------------------------------------------------------------------------------------
-class FBP64 {
- public:
-  static u32 compress(u64* src, u8* dest, u32 tuple_count);
-  static void decompress(u8* dest, const u8* src, u32 tuple_count, u32 level);
-};
 }  // namespace btrblocks::integers
 // -------------------------------------------------------------------------------------
