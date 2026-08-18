@@ -1,6 +1,7 @@
 #pragma once
 #include "compression/SchemePicker.hpp"
 #include "scheme/CompressionScheme.hpp"
+#include "scheme/CompressionScheme64.hpp"
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -190,6 +191,54 @@ inline void TRLE<INTEGER, IntegerScheme, SInteger32Stats, IntegerSchemeType>::de
     }
   }
 #endif
+}
+
+// No SIMD specialization for s64 (the INTEGER/DOUBLE ones use 256-bit
+// int32/double intrinsics that don't apply to 64-bit ints without a separate
+// code path) -- a plain scalar fill is still O(runs_count + tuple_count),
+// same asymptotic cost as the SIMD versions, just without the vectorized
+// constant factor. Correct is what's needed here; the SIMD win is future
+// work if 64-bit RLE columns turn out to be hot.
+template <>
+inline void TRLE<s64, Integer64Scheme, SInteger64Stats, Integer64SchemeType>::decompressColumn(
+    s64* dest,
+    BitmapWrapper*,
+    const u8* src,
+    u32 tuple_count,
+    u32 level) {
+  static_assert(sizeof(*dest) == 8);
+
+  const auto& col_struct = *reinterpret_cast<const RLEStructure*>(src);
+  // -------------------------------------------------------------------------------------
+  // Decompress values
+  thread_local std::vector<std::vector<s64>> values_v;
+  auto values =
+      get_level_data(values_v, col_struct.runs_count + SIMD_EXTRA_ELEMENTS(s64), level);
+  {
+    Integer64Scheme& scheme =
+        TypeWrapper<Integer64Scheme, Integer64SchemeType>::getScheme(col_struct.values_scheme_code);
+    scheme.decompress(values, nullptr, col_struct.data, col_struct.runs_count, level + 1);
+  }
+  // -------------------------------------------------------------------------------------
+  // Decompress counts
+  thread_local std::vector<std::vector<INTEGER>> counts_v;
+  auto counts =
+      get_level_data(counts_v, col_struct.runs_count + SIMD_EXTRA_ELEMENTS(INTEGER), level);
+  {
+    IntegerScheme& scheme =
+        TypeWrapper<IntegerScheme, IntegerSchemeType>::getScheme(col_struct.counts_scheme_code);
+    scheme.decompress(counts, nullptr, col_struct.data + col_struct.runs_count_offset,
+                      col_struct.runs_count, level + 1);
+  }
+  // -------------------------------------------------------------------------------------
+  auto write_ptr = dest;
+  for (u32 run_i = 0; run_i < col_struct.runs_count; run_i++) {
+    auto val = values[run_i];
+    auto target_ptr = write_ptr + counts[run_i];
+    while (write_ptr != target_ptr) {
+      *write_ptr++ = val;
+    }
+  }
 }
 
 template <>

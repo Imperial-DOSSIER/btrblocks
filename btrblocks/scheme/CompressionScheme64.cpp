@@ -83,8 +83,10 @@ string ConvertSchemeTypeToString(Integer64SchemeType type) {
       return "FOR";
     case Integer64SchemeType::TRUNCATION:
       return "TRUNCATION";
-    case Integer64SchemeType::FIXED_DICTIONARY:
-      return "FIXED_DICTIONARY";
+    case Integer64SchemeType::DICTIONARY_8:
+      return "DICTIONARY_8";
+    case Integer64SchemeType::DICTIONARY_16:
+      return "DICTIONARY_16";
     default:
       throw Generic_Exception("Unknown Integer64SchemeType");
   }

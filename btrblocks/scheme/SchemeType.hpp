@@ -52,7 +52,12 @@ enum class Integer64SchemeType : uint8_t {
   FREQUENCY = 7,
   FOR = 8,
   TRUNCATION = 9,
-  FIXED_DICTIONARY = 10,
+  // Split like the 32-bit enum's DICTIONARY_8/DICTIONARY_16 (fixed, O(1)
+  // random-access dictionaries with u8/u16 codes respectively), rather than
+  // sharing one slot, so both code widths can be registered and picked
+  // between at once -- exactly as on the 32-bit side.
+  DICTIONARY_8 = 10,
+  DICTIONARY_16 = 11,
   SCHEME_MAX = 32
 };
 using Integer64SchemeSet = SchemeSet<Integer64SchemeType>;
