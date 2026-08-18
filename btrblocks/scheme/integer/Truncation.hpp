@@ -17,6 +17,18 @@ class Truncation16 : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::TRUNCATION_16; }
   // -------------------------------------------------------------------------------------
@@ -40,6 +52,18 @@ class Truncation8 : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::TRUNCATION_8; }
   // -------------------------------------------------------------------------------------
@@ -91,27 +115,41 @@ void ITruncDecompress(INTEGER* dest,
                       const u8* src,
                       u32 tuple_count,
                       u32 level) {
-  /* As of now Truncation is unused and this part is commented out for simpler
-   * refactoring */
   const auto& col_struct = *reinterpret_cast<const TruncationStructure<CodeType>*>(src);
-  UNREACHABLE()
-  //   //
-  //   -------------------------------------------------------------------------------------
-  //   if (nullmap == nullptr || nullmap->type() == BitmapType::ALLONES) {
-  //       for (u32 row_i = 0; row_i < tuple_count; row_i++) {
-  //           dest[row_i] = col_struct.base +
-  //           col_struct.truncated_values[row_i];
-  //       }
-  //   } else if(nullmap->type() == BitmapType::ALLZEROS) {
-  //       return;
-  //   } else {
-  //       for (u32 row_i = 0; row_i < tuple_count; row_i++) {
-  //           if (nullmap->test(row_i)) {
-  //               dest[row_i] = col_struct.base +
-  //               col_struct.truncated_values[row_i];
-  //           }
-  //       }
-  //   }
+  // ITruncCompress only writes truncated_values[row_i] for non-null rows, so
+  // null rows must never be read here -- mirrors that same nullmap branching.
+  if (nullmap == nullptr || nullmap->type() == BitmapType::ALLONES) {
+    for (u32 row_i = 0; row_i < tuple_count; row_i++) {
+      dest[row_i] = col_struct.base + col_struct.truncated_values[row_i];
+    }
+  } else if (nullmap->type() == BitmapType::ALLZEROS) {
+    return;
+  } else {
+    for (u32 row_i = 0; row_i < tuple_count; row_i++) {
+      if (nullmap->test(row_i)) {
+        dest[row_i] = col_struct.base + col_struct.truncated_values[row_i];
+      }
+    }
+  }
+}
+// -------------------------------------------------------------------------------------
+// Fixed-width truncated values are directly addressable -- true O(1) random
+// access, same reasoning as Uncompressed. Null rows are never requested by a
+// well-formed caller (gather/lookupAt operate on already-decoded row
+// positions), so unlike decompress() this does not need nullmap branching.
+template <typename CodeType>
+void ITruncGather(INTEGER* dest,
+                  const u8* src,
+                  u32 tuple_count,
+                  const u32* positions,
+                  u32 position_count) {
+  if (tuple_count == 0 || position_count == 0) {
+    return;
+  }
+  const auto& col_struct = *reinterpret_cast<const TruncationStructure<CodeType>*>(src);
+  for (u32 i = 0; i < position_count; i++) {
+    dest[i] = col_struct.base + col_struct.truncated_values[positions[i]];
+  }
 }
 // -------------------------------------------------------------------------------------
 }  // namespace btrblocks::legacy::integers

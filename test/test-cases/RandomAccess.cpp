@@ -96,20 +96,11 @@ void checkGatherAgainstDecompress(IntegerScheme& scheme,
 }  // namespace
 // -------------------------------------------------------------------------------------
 TEST(RandomAccess, Begin) {
-  // Exercise every scheme that can actually round-trip, which is every
-  // registered scheme except TRUNCATION_8/16.
-  //
-  // Those two are write-only in this codebase: ITruncCompress is implemented
-  // and ITruncExpectedCF reports a positive ratio whenever the value range fits
-  // the code type, but ITruncDecompress (Truncation.hpp:97) is a bare
-  // UNREACHABLE() -- i.e. __builtin_unreachable(), undefined behaviour rather
-  // than a trap. Enabling them lets the picker cascade into a stream that can
-  // never be read back, which corrupts the stack on decompress. Pre-existing,
-  // and orthogonal to the random-access API under test here.
+  // Exercise every registered scheme, including TRUNCATION_8/16 -- these used
+  // to be write-only (ITruncDecompress was a bare UNREACHABLE()), which is
+  // now fixed; see the RoundTrip tests below for a dedicated regression check.
   auto schemes = IntegerSchemeSet{};
   schemes.enableAll();
-  schemes.disable(IntegerSchemeType::TRUNCATION_8);
-  schemes.disable(IntegerSchemeType::TRUNCATION_16);
   BtrBlocksConfig::get().integers.schemes = schemes;
   BtrBlocksConfig::get().doubles.schemes = defaultDoubleSchemes();
   BtrBlocksConfig::get().strings.schemes = defaultStringSchemes();
