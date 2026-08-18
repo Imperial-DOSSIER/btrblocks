@@ -30,6 +30,13 @@ class Utils {
     return std::max(std::floor(std::log2(input)) + 1, 1.0);
   }
 
+  static constexpr u32 getBitsNeeded(s64 input) {
+    if (input < 0) {
+      return 64;
+    }
+    return std::max(std::floor(std::log2(input)) + 1, 1.0);
+  }
+
   static void multiplyString(char* dest, const char* src, u32 len, u32 n, u32 src_n) {
     // IDEA:
     // Move this check out of here and only perform it when these cases can

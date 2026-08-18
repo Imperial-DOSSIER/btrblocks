@@ -36,6 +36,32 @@ constexpr IntegerSchemeSet defaultIntegerSchemes() {
           IntegerSchemeType::RLE,          IntegerSchemeType::PFOR,      IntegerSchemeType::BP};
 };
 // ------------------------------------------------------------------------------
+// Native 64-bit sibling of IntegerSchemeType, for ColumnType::BIGINT. Mirrors
+// the 32-bit enum's registered set 1:1 (values need not match the 32-bit
+// enum's legacy-code numbering, since this is a separate scheme-code space).
+// SUB_INT_SPLIT stays opt-in-only here too, exactly like the 32-bit scheme.
+// ------------------------------------------------------------------------------
+enum class Integer64SchemeType : uint8_t {
+  UNCOMPRESSED = 0,
+  ONE_VALUE = 1,
+  DICT = 2,
+  RLE = 3,
+  PFOR = 4,
+  BP = 5,
+  SUB_INT_SPLIT = 6,
+  FREQUENCY = 7,
+  FOR = 8,
+  TRUNCATION = 9,
+  FIXED_DICTIONARY = 10,
+  SCHEME_MAX = 32
+};
+using Integer64SchemeSet = SchemeSet<Integer64SchemeType>;
+constexpr Integer64SchemeSet defaultInteger64Schemes() {
+  return {Integer64SchemeType::UNCOMPRESSED, Integer64SchemeType::ONE_VALUE,
+          Integer64SchemeType::DICT,         Integer64SchemeType::RLE,
+          Integer64SchemeType::PFOR,         Integer64SchemeType::BP};
+};
+// ------------------------------------------------------------------------------
 enum class DoubleSchemeType : uint8_t {
   UNCOMPRESSED = 0,
   ONE_VALUE = 1,
