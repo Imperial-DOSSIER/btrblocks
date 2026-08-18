@@ -74,26 +74,31 @@ class Truncation8 : public IntegerScheme {
   }
 };
 // -------------------------------------------------------------------------------------
-template <typename CodeType>
+// ValueType is explicit (never defaulted) so 32- and 64-bit truncation share
+// one implementation: only the value width and its stats type actually
+// differ between Truncation8/16 (ValueType = INTEGER, StatsType =
+// SInteger32Stats) and Truncation64 (ValueType = BIGINT, StatsType =
+// SInteger64Stats). CodeType is the truncated storage width (u8/u16/u32).
+template <typename ValueType, typename CodeType>
 struct TruncationStructure {
-  INTEGER base;
+  ValueType base;
   CodeType truncated_values[];
 };
 // -------------------------------------------------------------------------------------
-template <typename CodeType>
-double ITruncExpectedCF(btrblocks::SInteger32Stats& stats) {
+template <typename CodeType, typename StatsType>
+double ITruncExpectedCF(StatsType& stats) {
   if (stats.max - stats.min <= (std::numeric_limits<CodeType>::max())) {
-    return sizeof(INTEGER) / sizeof(CodeType);
+    return sizeof(decltype(stats.max)) / sizeof(CodeType);
   } else {
     return 0;
   }
 }
 // -------------------------------------------------------------------------------------
-template <typename CodeType>
-double ITruncCompress(const INTEGER* src, const BITMAP* nullmap, u8* dest, SInteger32Stats& stats) {
+template <typename CodeType, typename ValueType, typename StatsType>
+double ITruncCompress(const ValueType* src, const BITMAP* nullmap, u8* dest, StatsType& stats) {
   die_if(stats.max - stats.min <= std::numeric_limits<CodeType>::max());
   // -------------------------------------------------------------------------------------
-  auto& col_struct = *reinterpret_cast<TruncationStructure<CodeType>*>(dest);
+  auto& col_struct = *reinterpret_cast<TruncationStructure<ValueType, CodeType>*>(dest);
   // -------------------------------------------------------------------------------------
   // Set the base
   col_struct.base = stats.min;
@@ -106,16 +111,16 @@ double ITruncCompress(const INTEGER* src, const BITMAP* nullmap, u8* dest, SInte
     }
   }
   // -------------------------------------------------------------------------------------
-  return sizeof(TruncationStructure<CodeType>) + (sizeof(CodeType) * stats.tuple_count);
+  return sizeof(TruncationStructure<ValueType, CodeType>) + (sizeof(CodeType) * stats.tuple_count);
 }
 // -------------------------------------------------------------------------------------
-template <typename CodeType>
-void ITruncDecompress(INTEGER* dest,
+template <typename CodeType, typename ValueType>
+void ITruncDecompress(ValueType* dest,
                       BitmapWrapper* nullmap,
                       const u8* src,
                       u32 tuple_count,
                       u32 level) {
-  const auto& col_struct = *reinterpret_cast<const TruncationStructure<CodeType>*>(src);
+  const auto& col_struct = *reinterpret_cast<const TruncationStructure<ValueType, CodeType>*>(src);
   // ITruncCompress only writes truncated_values[row_i] for non-null rows, so
   // null rows must never be read here -- mirrors that same nullmap branching.
   if (nullmap == nullptr || nullmap->type() == BitmapType::ALLONES) {
@@ -137,8 +142,8 @@ void ITruncDecompress(INTEGER* dest,
 // access, same reasoning as Uncompressed. Null rows are never requested by a
 // well-formed caller (gather/lookupAt operate on already-decoded row
 // positions), so unlike decompress() this does not need nullmap branching.
-template <typename CodeType>
-void ITruncGather(INTEGER* dest,
+template <typename CodeType, typename ValueType>
+void ITruncGather(ValueType* dest,
                   const u8* src,
                   u32 tuple_count,
                   const u32* positions,
@@ -146,7 +151,7 @@ void ITruncGather(INTEGER* dest,
   if (tuple_count == 0 || position_count == 0) {
     return;
   }
-  const auto& col_struct = *reinterpret_cast<const TruncationStructure<CodeType>*>(src);
+  const auto& col_struct = *reinterpret_cast<const TruncationStructure<ValueType, CodeType>*>(src);
   for (u32 i = 0; i < position_count; i++) {
     dest[i] = col_struct.base + col_struct.truncated_values[positions[i]];
   }

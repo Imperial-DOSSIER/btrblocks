@@ -7,11 +7,13 @@
 #include "scheme/integer64/BP64.hpp"
 #include "scheme/integer64/DynamicDictionary64.hpp"
 #include "scheme/integer64/FOR64.hpp"
+#include "scheme/integer64/Frequency64.hpp"
 #include "scheme/integer64/OneValue64.hpp"
 #include "scheme/integer64/RLE64.hpp"
 #include "scheme/integer64/Uncompressed64.hpp"
 // legacy schemes
 #include "scheme/integer64/FixedDictionary64.hpp"
+#include "scheme/integer64/Truncation64.hpp"
 // -------------------------------------------------------------------------------------
 #include "scheme/integer/DynamicDictionary.hpp"
 #include "scheme/integer/Frequency.hpp"
@@ -92,7 +94,8 @@ SchemesCollection::SchemesCollection() {
     die_if(cfg.integers64.schemes.isEnabled(Integer64SchemeType::UNCOMPRESSED));
     // optional integer64 schemes -- more are added as later phases port them
     addIfEnabled<Uncompressed64, OneValue64, BP64, FOR64, RLE64, DynamicDictionary64,
-                 Dictionary8_64, Dictionary16_64>(integer64_schemes, cfg.integers64.schemes);
+                 Dictionary8_64, Dictionary16_64, Frequency64, Truncation64>(
+        integer64_schemes, cfg.integers64.schemes);
   }
   // Double Schemes
   {
