@@ -4,6 +4,9 @@
 // -------------------------------------------------------------------------------------
 #include "common/Utils.hpp"
 // -------------------------------------------------------------------------------------
+#include "scheme/integer64/OneValue64.hpp"
+#include "scheme/integer64/Uncompressed64.hpp"
+// -------------------------------------------------------------------------------------
 #include "scheme/integer/DynamicDictionary.hpp"
 #include "scheme/integer/Frequency.hpp"
 #include "scheme/integer/OneValue.hpp"
@@ -77,15 +80,12 @@ SchemesCollection::SchemesCollection() {
   }
   // Integer64 Schemes (ColumnType::BIGINT)
   {
-    // required schemes -- checked against the *enabled-schemes* bitset only;
-    // this stays valid even before any Integer64Scheme subclass exists, since
-    // defaultInteger64Schemes() enables both bits by default.
+    using namespace integers64;
+    // required schemes
     die_if(cfg.integers64.schemes.isEnabled(Integer64SchemeType::ONE_VALUE));
     die_if(cfg.integers64.schemes.isEnabled(Integer64SchemeType::UNCOMPRESSED));
-    // Phase 64-1: scaffolding only, no concrete Integer64Scheme subclasses
-    // exist yet, so integer64_schemes stays empty here. Phase 64-3 adds the
-    // addIfEnabled<Uncompressed64, OneValue64, ...>(integer64_schemes,
-    // cfg.integers64.schemes) call once those classes exist.
+    // optional integer64 schemes -- more are added as later phases port them
+    addIfEnabled<Uncompressed64, OneValue64>(integer64_schemes, cfg.integers64.schemes);
   }
   // Double Schemes
   {

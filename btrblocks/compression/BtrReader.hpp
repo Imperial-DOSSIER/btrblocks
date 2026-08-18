@@ -36,6 +36,14 @@ class BtrReader {
                     u32* chunks_touched = nullptr);
   [[nodiscard]] INTEGER lookupColumn(u32 position);
   // -------------------------------------------------------------------------------------
+  // Same contract as gatherColumn/lookupColumn, for ColumnType::BIGINT columns.
+  // -------------------------------------------------------------------------------------
+  void gatherColumn64(BIGINT* dest,
+                      const u32* positions,
+                      u32 position_count,
+                      u32* chunks_touched = nullptr);
+  [[nodiscard]] BIGINT lookupColumn64(u32 position);
+  // -------------------------------------------------------------------------------------
   [[nodiscard]] string getSchemeDescription(u32 index);
   [[nodiscard]] string getBasicSchemeDescription(u32 index);
 
