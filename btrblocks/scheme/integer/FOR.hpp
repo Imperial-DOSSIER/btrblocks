@@ -24,6 +24,22 @@ class FOR : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  // FOR is a pure cascading wrapper (bias + delegate), so its random access is
+  // exactly as good as its child scheme's: delegate gather to the child on
+  // just the requested positions, then add bias only to those results,
+  // instead of falling back to the base class's full-chunk decode.
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   std::string fullDescription(const u8* src) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::FOR; }
