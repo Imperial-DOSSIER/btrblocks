@@ -9,6 +9,9 @@
 #include "extern/FastPFOR.hpp"
 // -------------------------------------------------------------------------------------
 #include <cmath>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 // -------------------------------------------------------------------------------------
 // whether to use the compression ratio estimation for FBP
 constexpr bool auto_fpb = true;
@@ -154,6 +157,65 @@ void FBP::decompress(INTEGER* dest, BitmapWrapper*, const u8* src, u32 tuple_cou
     throw Generic_Exception("Decompressing XPBP failed");
   }
   assert(decompressed_codes_size == tuple_count);
+}
+// -------------------------------------------------------------------------------------
+void FBP::gather(INTEGER* dest,
+                 const u8* src,
+                 BitmapWrapper* nullmap,
+                 u32 tuple_count,
+                 const u32* positions,
+                 u32 position_count,
+                 u32 level) {
+  if (tuple_count == 0 || position_count == 0) {
+    return;
+  }
+  const auto& col_struct = *reinterpret_cast<const XPBPStructure*>(src);
+  const auto* encoded_array =
+      reinterpret_cast<const u32*>(col_struct.data + col_struct.padding);
+  FBPImpl codec;
+  const u32 block_packed_count = codec.blockPackedCount(encoded_array);
+
+  // Positions in the composite codec's VariableByte tail (always < kBlockSize
+  // values) aren't block-addressable -- resolve them via one full decompress,
+  // same cost as today's fallback, but only when actually requested.
+  std::vector<INTEGER> tail_scratch;
+  bool any_tail = false;
+  for (u32 i = 0; i < position_count; i++) {
+    if (positions[i] >= block_packed_count) {
+      any_tail = true;
+      break;
+    }
+  }
+  if (any_tail) {
+    tail_scratch.resize(tuple_count + SIMD_EXTRA_ELEMENTS(INTEGER));
+    this->decompress(tail_scratch.data(), nullmap, src, tuple_count, level);
+  }
+
+  // Group the remaining positions by block so each touched block is unpacked
+  // exactly once, regardless of how many positions fall inside it.
+  std::unordered_map<u32, std::vector<std::pair<u32, u32>>> blocks_needed;
+  for (u32 i = 0; i < position_count; i++) {
+    if (positions[i] >= block_packed_count) {
+      dest[i] = tail_scratch[positions[i]];
+    } else {
+      blocks_needed[positions[i] / FBPImpl::kBlockSize].emplace_back(
+          positions[i] % FBPImpl::kBlockSize, i);
+    }
+  }
+
+  INTEGER block_scratch[FBPImpl::kBlockSize];
+  for (auto& [block_idx, entries] : blocks_needed) {
+    codec.decompressBlock(encoded_array, block_idx, reinterpret_cast<u32*>(block_scratch));
+    for (auto& [local_pos, out_slot] : entries) {
+      dest[out_slot] = block_scratch[local_pos];
+    }
+  }
+}
+// -------------------------------------------------------------------------------------
+INTEGER FBP::lookupAt(const u8* src, BitmapWrapper* nullmap, u32 tuple_count, u32 position, u32 level) {
+  INTEGER result = 0;
+  this->gather(&result, src, nullmap, tuple_count, &position, 1, level);
+  return result;
 }
 // -------------------------------------------------------------------------------------
 void FBP::scan(Predicate, BITMAP*, const u8*, u32) {

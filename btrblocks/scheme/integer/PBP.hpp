@@ -61,6 +61,29 @@ class FBP : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  // Mini-block random access: decodes only the ~128-value FastBinaryPacking
+  // block(s) containing the requested positions (grouped so each touched
+  // block is unpacked once), instead of the base class's full-chunk decode.
+  // Positions past the block-packed region (the composite codec's
+  // VariableByte-encoded tail, always < 128 values) fall back to one full
+  // decompress() call -- isolating that self-delimited byte stream without a
+  // reliable value-count-based stop condition isn't safe to hand-roll (see
+  // extern/FastPFOR.hpp's comment). PFOR (class PBP, below) is not covered:
+  // SIMDFastPFor's much larger per-page patched-exception layout doesn't
+  // offer the same cheap header-skip structure, so it keeps the base class's
+  // full-chunk fallback -- an intentional scope limit, not an oversight.
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::BP; }
   INTEGER lookup(u32) override;
