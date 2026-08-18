@@ -193,7 +193,17 @@ TEST(RandomAccess64, GatherMatchesDecompressOnFullRangeData) {
   const auto data = makeFullRange64Data(9000);
   ASSERT_FALSE(SchemePool::available_schemes->integer64_schemes.empty());
 
+  // Truncation64/Dictionary8_64/Dictionary16_64 are deliberately excluded --
+  // see makeFullRange64Data's comment. Calling compress() on data outside a
+  // scheme's precondition is a misuse, not a bug: Truncation64's own die_if
+  // aborts the process rather than gracefully rejecting, so this is not
+  // optional the way it is for e.g. a scheme that would just compress badly.
   for (auto& entry : SchemePool::available_schemes->integer64_schemes) {
+    if (entry.first == Integer64SchemeType::TRUNCATION ||
+        entry.first == Integer64SchemeType::DICTIONARY_8 ||
+        entry.first == Integer64SchemeType::DICTIONARY_16) {
+      continue;
+    }
     const auto scheme_name = ConvertSchemeTypeToString(entry.first);
     SCOPED_TRACE("scheme = " + scheme_name);
     checkGatherAgainstDecompress64(*entry.second, data, scheme_name);
