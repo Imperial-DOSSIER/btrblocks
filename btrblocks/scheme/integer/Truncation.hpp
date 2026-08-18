@@ -2,6 +2,8 @@
 // -------------------------------------------------------------------------------------
 #include "scheme/CompressionScheme.hpp"
 // -------------------------------------------------------------------------------------
+#include <type_traits>
+// -------------------------------------------------------------------------------------
 namespace btrblocks::legacy::integers {
 // -------------------------------------------------------------------------------------
 class Truncation16 : public IntegerScheme {
@@ -85,9 +87,23 @@ struct TruncationStructure {
   CodeType truncated_values[];
 };
 // -------------------------------------------------------------------------------------
+// stats.max - stats.min computed directly in ValueType overflows (UB, and in
+// practice wraps to a small/negative garbage value on two's complement) once
+// the true span exceeds ValueType's positive range -- reachable for BIGINT
+// (s64) columns whose min is very negative and max is very positive, e.g.
+// max=9219975212976900024, min=-9222374331237171331 (true span ~1.8e19,
+// which does not fit in s64). Subtracting in the unsigned counterpart type
+// is exact instead: both operands are representable N-bit values with
+// max >= min, so the unsigned difference never itself wraps.
+template <typename ValueType>
+auto truncSpan(ValueType max, ValueType min) {
+  using UnsignedType = std::make_unsigned_t<ValueType>;
+  return static_cast<UnsignedType>(max) - static_cast<UnsignedType>(min);
+}
+// -------------------------------------------------------------------------------------
 template <typename CodeType, typename StatsType>
 double ITruncExpectedCF(StatsType& stats) {
-  if (stats.max - stats.min <= (std::numeric_limits<CodeType>::max())) {
+  if (truncSpan(stats.max, stats.min) <= (std::numeric_limits<CodeType>::max())) {
     return sizeof(decltype(stats.max)) / sizeof(CodeType);
   } else {
     return 0;
@@ -96,7 +112,7 @@ double ITruncExpectedCF(StatsType& stats) {
 // -------------------------------------------------------------------------------------
 template <typename CodeType, typename ValueType, typename StatsType>
 double ITruncCompress(const ValueType* src, const BITMAP* nullmap, u8* dest, StatsType& stats) {
-  die_if(stats.max - stats.min <= std::numeric_limits<CodeType>::max());
+  die_if(truncSpan(stats.max, stats.min) <= std::numeric_limits<CodeType>::max());
   // -------------------------------------------------------------------------------------
   auto& col_struct = *reinterpret_cast<TruncationStructure<ValueType, CodeType>*>(dest);
   // -------------------------------------------------------------------------------------

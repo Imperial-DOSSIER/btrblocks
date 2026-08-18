@@ -44,7 +44,11 @@ class Truncation64 : public Integer64Scheme {
   BIGINT lookup(u32) override;
   void scan(Predicate, BITMAP*, const u8*, u32) override;
   bool canCompress(SInteger64Stats& stats) {
-    return static_cast<UBIGINT>(stats.max - stats.min) <=
+    // stats.max - stats.min in BIGINT (s64) can itself overflow before the
+    // cast ever runs -- see the truncSpan() comment in
+    // scheme/integer/Truncation.hpp, which ITruncExpectedCF/ITruncCompress
+    // use instead of this unused-but-kept-consistent helper.
+    return (static_cast<UBIGINT>(stats.max) - static_cast<UBIGINT>(stats.min)) <=
            static_cast<UBIGINT>(std::numeric_limits<u32>::max());
   }
 };
