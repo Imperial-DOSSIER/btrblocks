@@ -88,6 +88,15 @@ SIZE Datablock::compress(const InputChunk& input_chunk, u8* output) {
       // -------------------------------------------------------------------------------------
       break;
     }
+    case ColumnType::BIGINT: {
+      // -------------------------------------------------------------------------------------
+      Integer64SchemePicker::compress(reinterpret_cast<BIGINT*>(input_chunk.data.get()),
+                                      input_chunk.nullmap.get(), output_data, input_chunk.tuple_count,
+                                      cfg.integers64.max_cascade_depth, meta->nullmap_offset,
+                                      meta->compression_type);
+      // -------------------------------------------------------------------------------------
+      break;
+    }
     case ColumnType::STRING: {
       // -------------------------------------------------------------------------------------
       // Collect stats
@@ -175,6 +184,15 @@ bool Datablock::decompress(const u8* data_in, BitmapWrapper** bitmap_out, u8* da
       requires_copy_out = false;
       break;
     }
+    case ColumnType::BIGINT: {
+      auto& scheme =
+          SchemePool::available_schemes
+              ->integer64_schemes[static_cast<Integer64SchemeType>(meta->compression_type)];
+      scheme->decompress(reinterpret_cast<BIGINT*>(data_out), *bitmap_out, meta->data,
+                         meta->tuple_count, 0);
+      requires_copy_out = false;
+      break;
+    }
     case ColumnType::STRING: {
       auto& scheme = SchemePool::available_schemes
                          ->string_schemes[static_cast<StringSchemeType>(meta->compression_type)];
@@ -250,6 +268,16 @@ OutputBlockStats Datablock::compress(const Chunk& input_chunk, BytesArray& outpu
             input_chunk.array<DOUBLE>(column_i), input_chunk.nullmap(column_i),
             output_block.get() + db_write_offset, input_chunk.tuple_count,
             cfg.doubles.max_cascade_depth, after_column_size, column_meta.compression_type);
+        // -------------------------------------------------------------------------------------
+        break;
+      }
+      case ColumnType::BIGINT: {
+        // -------------------------------------------------------------------------------------
+        Integer64SchemePicker::compress(
+            input_chunk.array<BIGINT>(column_i), input_chunk.nullmap(column_i),
+            output_block.get() + db_write_offset, input_chunk.tuple_count,
+            cfg.integers64.max_cascade_depth, after_column_size, column_meta.compression_type);
+        after_column_size += sizeof(column_meta.bias);
         // -------------------------------------------------------------------------------------
         break;
       }
@@ -385,6 +413,21 @@ btrblocks::Chunk Datablock::decompress(const BytesArray& input_db) {
         auto& scheme = SchemePool::available_schemes->double_schemes[used_compression_scheme];
         // -------------------------------------------------------------------------------------
         scheme->decompress(column_dest_double_array, &bitmap, input_db.get() + column_meta.offset,
+                           tuple_count, 0);
+        column_requires_copy[column_i] = false;
+        break;
+      }
+      case ColumnType::BIGINT: {
+        // -------------------------------------------------------------------------------------
+        sizes[column_i] = sizeof(BIGINT) * tuple_count;
+        columns[column_i] = makeBytesArray(sizeof(BIGINT) * tuple_count + SIMD_EXTRA_BYTES);
+        // -------------------------------------------------------------------------------------
+        auto destination_array = reinterpret_cast<BIGINT*>(columns[column_i].get());
+        const auto used_compression_scheme =
+            static_cast<Integer64SchemeType>(column_meta.compression_type);
+        auto& scheme = SchemePool::available_schemes->integer64_schemes[used_compression_scheme];
+        // -------------------------------------------------------------------------------------
+        scheme->decompress(destination_array, &bitmap, input_db.get() + column_meta.offset,
                            tuple_count, 0);
         column_requires_copy[column_i] = false;
         break;

@@ -63,6 +63,15 @@ bool BtrReader::readColumn(std::vector<u8>& output_chunk_v, u32 index) {
       scheme.decompress(destination_array, bitmap, input_data, tuple_count, 0);
       break;
     }
+    case ColumnType::BIGINT: {
+      // Prepare destination array
+      auto destination_array = reinterpret_cast<BIGINT*>(output_chunk);
+
+      // Fetch the scheme from metadata
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
+      scheme.decompress(destination_array, bitmap, input_data, tuple_count, 0);
+      break;
+    }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
       requires_copy = scheme.decompressNoCopy(output_chunk, bitmap, input_data, tuple_count, 0);
@@ -164,6 +173,10 @@ string BtrReader::getSchemeDescription(u32 index) {
       auto& scheme = DoubleSchemePicker::MyTypeWrapper::getScheme(compression);
       return scheme.fullDescription(src);
     }
+    case ColumnType::BIGINT: {
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(compression);
+      return scheme.fullDescription(src);
+    }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(compression);
       return scheme.fullDescription(src);
@@ -186,6 +199,10 @@ string BtrReader::getBasicSchemeDescription(u32 index) {
     }
     case ColumnType::DOUBLE: {
       auto& scheme = DoubleSchemePicker::MyTypeWrapper::getScheme(compression);
+      return scheme.selfDescription();
+    }
+    case ColumnType::BIGINT: {
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(compression);
       return scheme.selfDescription();
     }
     case ColumnType::STRING: {
@@ -243,6 +260,9 @@ u32 BtrReader::getDecompressedSize(u32 index) {
     case ColumnType::DOUBLE: {
       return sizeof(DOUBLE) * meta->tuple_count;
     }
+    case ColumnType::BIGINT: {
+      return sizeof(BIGINT) * meta->tuple_count;
+    }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
 
@@ -268,6 +288,9 @@ u32 BtrReader::getDecompressedDataSize(u32 index) {
     }
     case ColumnType::DOUBLE: {
       return sizeof(DOUBLE) * meta->tuple_count;
+    }
+    case ColumnType::BIGINT: {
+      return sizeof(BIGINT) * meta->tuple_count;
     }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);

@@ -100,6 +100,13 @@ Chunk Relation::getChunk(const vector<btrblocks::Range>& ranges, SIZE chunk_i) c
                     chunk_tuple_count * sizeof(DOUBLE));
         break;
       }
+      case ColumnType::BIGINT: {
+        c_sizes[i] = chunk_tuple_count * sizeof(BIGINT);
+        c_columns[i] = std::unique_ptr<u8[]>(new u8[c_sizes[i]]);
+        std::memcpy(reinterpret_cast<void*>(c_columns[i].get()), columns[i].bigints().data + offset,
+                    chunk_tuple_count * sizeof(BIGINT));
+        break;
+      }
       case ColumnType::STRING: {
         const u64 slots_size = sizeof(StringArrayViewer::Slot) * (chunk_tuple_count + 1);
         // -------------------------------------------------------------------------------------
@@ -161,6 +168,13 @@ InputChunk Relation::getInputChunk(const Range& range,
       data = std::unique_ptr<u8[]>(new u8[size]);
       std::memcpy(reinterpret_cast<void*>(data.get()), columns[column].doubles().data + offset,
                   chunk_tuple_count * sizeof(DOUBLE));
+      break;
+    }
+    case ColumnType::BIGINT: {
+      size = chunk_tuple_count * sizeof(BIGINT);
+      data = std::unique_ptr<u8[]>(new u8[size]);
+      std::memcpy(reinterpret_cast<void*>(data.get()), columns[column].bigints().data + offset,
+                  chunk_tuple_count * sizeof(BIGINT));
       break;
     }
     case ColumnType::STRING: {
