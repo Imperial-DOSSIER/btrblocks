@@ -36,16 +36,24 @@ BASELINE, CODECS, END_TO_END = "baseline", "codecs", "end_to_end"
 CODEC_INFO = {
     "UNCOMPRESSED": (BASELINE, "Uncompressed *(reference)*"),
     "RAW64": (BASELINE, "Uncompressed *(reference)*"),
+    "UNCOMPRESSED64": (BASELINE, "Uncompressed *(reference)*"),
     "BP": (CODECS, "BP"),
+    "BP64": (CODECS, "BP"),
     "PFOR": (CODECS, "PFOR"),
+    "FOR": (CODECS, "FOR"),
+    "FOR64": (CODECS, "FOR"),
     "DICT": (CODECS, "DICT"),
+    "DICT64": (CODECS, "DICT"),
     "RLE": (CODECS, "RLE"),
+    "RLE64": (CODECS, "RLE"),
     "SIS_HALVES": (CODECS, "SubIntSplit (fixed split)"),
     "SIS64_HALVES": (CODECS, "SubIntSplit (fixed split)"),
     "SIS_PLANNED": (CODECS, "SubIntSplit (planned)"),
     "SIS64_PLANNED": (CODECS, "SubIntSplit (planned)"),
     "AUTO_BASELINE": (END_TO_END, "BtrBlocks (auto, without SIS)"),
+    "AUTO_BASELINE64": (END_TO_END, "BtrBlocks (auto, without SIS)"),
     "AUTO_WITH_SIS": (END_TO_END, "BtrBlocks (auto, with SIS)"),
+    "AUTO_WITH_SIS64": (END_TO_END, "BtrBlocks (auto, with SIS)"),
 }
 BAND_ORDER = [BASELINE, CODECS, END_TO_END]
 
