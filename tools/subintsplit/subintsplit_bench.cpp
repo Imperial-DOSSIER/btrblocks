@@ -420,6 +420,12 @@ Result run64(const std::string& dataset_name,
   }
   result.chunks = static_cast<uint32_t>(chunk_ranges.size());
 
+  // SubIntSplit64 is now a registered Integer64Scheme (instance methods,
+  // stats-driven compress()) rather than a free-standing static-method
+  // class; one instance is reused across chunks/calls the same way the
+  // 32-bit arm reuses whichever IntegerScheme the picker handed back.
+  integers::SubIntSplit64 scheme;
+
   std::vector<std::vector<u8>> compressed(chunk_ranges.size());
   const auto compressAll = [&]() {
     ScopedBoundaries boundaries(codec.forced_boundaries, 64);
@@ -432,9 +438,10 @@ Result run64(const std::string& dataset_name,
         continue;
       }
       std::vector<u8> buffer(integers::SubIntSplit64::maxCompressedSize(range.count));
-      const u32 size = integers::SubIntSplit64::compress(
-          data.data() + range.start, nullptr, buffer.data(), range.count,
-          BtrBlocksConfig::get().integers.max_cascade_depth);
+      SInteger64Stats stats =
+          SInteger64Stats::generateStats(data.data() + range.start, nullptr, range.count);
+      const u32 size = scheme.compress(data.data() + range.start, nullptr, buffer.data(), stats,
+                                       BtrBlocksConfig::get().integers.max_cascade_depth);
       buffer.resize(size);
       compressed[chunk_i] = std::move(buffer);
     }
@@ -449,16 +456,17 @@ Result run64(const std::string& dataset_name,
   result.ratio = static_cast<double>(data.size() * sizeof(s64)) /
                  static_cast<double>(std::max<uint64_t>(encoded_bytes, 1));
   if (!raw) {
-    result.plan = integers::SubIntSplit64::fullDescription(compressed[0].data());
+    result.plan = scheme.fullDescription(compressed[0].data());
 
     // As in the 32-bit arm: one more compress of chunk 0 outside timing, so the
     // sections describe the same chunk the plan column does.
     subintsplit::lastPlanReport().valid = false;
     ScopedBoundaries boundaries(codec.forced_boundaries, 64);
     std::vector<u8> scratch(integers::SubIntSplit64::maxCompressedSize(chunk_ranges[0].count));
-    integers::SubIntSplit64::compress(data.data() + chunk_ranges[0].start, nullptr, scratch.data(),
-                                      chunk_ranges[0].count,
-                                      BtrBlocksConfig::get().integers.max_cascade_depth);
+    SInteger64Stats scratch_stats = SInteger64Stats::generateStats(
+        data.data() + chunk_ranges[0].start, nullptr, chunk_ranges[0].count);
+    scheme.compress(data.data() + chunk_ranges[0].start, nullptr, scratch.data(), scratch_stats,
+                    BtrBlocksConfig::get().integers.max_cascade_depth);
     collectSections(result);
   } else {
     result.plan = "RAW64";
@@ -473,8 +481,8 @@ Result run64(const std::string& dataset_name,
         std::memcpy(decoded.data() + range.start, compressed[chunk_i].data(),
                     static_cast<std::size_t>(range.count) * sizeof(s64));
       } else {
-        integers::SubIntSplit64::decompress(decoded.data() + range.start,
-                                            compressed[chunk_i].data(), range.count, 0);
+        scheme.decompress(decoded.data() + range.start, nullptr, compressed[chunk_i].data(),
+                          range.count, 0);
       }
     }
   };
@@ -524,9 +532,9 @@ Result run64(const std::string& dataset_name,
             chunk_result[j] = values[local[chunk_i][j]];
           }
         } else {
-          integers::SubIntSplit64::gather(chunk_result.data(), compressed[chunk_i].data(),
-                                          chunk_ranges[chunk_i].count, local[chunk_i].data(),
-                                          static_cast<u32>(local[chunk_i].size()), 0);
+          scheme.gather(chunk_result.data(), compressed[chunk_i].data(), nullptr,
+                       chunk_ranges[chunk_i].count, local[chunk_i].data(),
+                       static_cast<u32>(local[chunk_i].size()), 0);
         }
         for (std::size_t j = 0; j < local[chunk_i].size(); j++) {
           gathered[slots[chunk_i][j]] = chunk_result[j];
@@ -558,8 +566,8 @@ Result run64(const std::string& dataset_name,
       if (raw) {
         value = reinterpret_cast<const s64*>(compressed[chunk_i].data())[local];
       } else {
-        value = integers::SubIntSplit64::lookupAt(compressed[chunk_i].data(),
-                                                  chunk_ranges[chunk_i].count, local, 0);
+        value = scheme.lookupAt(compressed[chunk_i].data(), nullptr, chunk_ranges[chunk_i].count,
+                                local, 0);
       }
       volatile s64 sink = value;
       (void)sink;

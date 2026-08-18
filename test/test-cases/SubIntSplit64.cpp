@@ -1,8 +1,12 @@
 // -------------------------------------------------------------------------------------
 // Round-trip tests for the 64-bit SubIntSplit variant.
 //
-// BtrBlocks has no 64-bit scheme hierarchy, so this is driven directly rather
-// than through Relation/Datablock. Sections are still compressed by the
+// SubIntSplit64 is a registered Integer64Scheme now, but these tests still
+// drive it directly (constructing an instance and calling compress/decompress
+// /gather/lookupAt) rather than through Relation/Datablock, so they can
+// inspect the encoded buffer's header/section layout directly (section
+// count, chosen scheme codes, forced-boundary description) the way the
+// higher-level pipeline doesn't expose. Sections are still compressed by the
 // ordinary 32-bit scheme pool, which is the point of the design.
 // -------------------------------------------------------------------------------------
 #include "TestHelper.hpp"
@@ -50,11 +54,13 @@ std::vector<s64> makeSnowflake64(std::size_t count, uint32_t seed = 1) {
 u32 roundTrip64(const std::vector<s64>& data, u8 cascade_level = 3) {
   const auto tuple_count = static_cast<u32>(data.size());
   auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  SubIntSplit64 scheme;
+  SInteger64Stats stats = SInteger64Stats::generateStats(data.data(), nullptr, tuple_count);
   const u32 size =
-      SubIntSplit64::compress(data.data(), nullptr, compressed.get(), tuple_count, cascade_level);
+      scheme.compress(data.data(), nullptr, compressed.get(), stats, cascade_level);
 
   std::vector<s64> decoded(tuple_count + 64);
-  SubIntSplit64::decompress(decoded.data(), compressed.get(), tuple_count, 0);
+  scheme.decompress(decoded.data(), nullptr, compressed.get(), tuple_count, 0);
 
   for (u32 i = 0; i < tuple_count; i++) {
     EXPECT_EQ(decoded[i], data[i]) << "row " << i;
@@ -154,10 +160,13 @@ TEST(SubIntSplit64, TerminatesAtEveryCascadeDepth) {
 // starts at the shallowest cascade depth.
 TEST(SubIntSplit64, SectionsFitTheThirtyTwoBitPool) {
   const auto data = makeSnowflake64(16384);
-  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
+  const auto tuple_count = static_cast<u32>(data.size());
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  SubIntSplit64 scheme;
+  SInteger64Stats stats = SInteger64Stats::generateStats(data.data(), nullptr, tuple_count);
 
   ASSERT_EQ(ThreadCache::get().compression_level, 0);
-  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+  scheme.compress(data.data(), nullptr, compressed.get(), stats, 3);
   ASSERT_EQ(ThreadCache::get().compression_level, 0);
 
   const auto* header = reinterpret_cast<const SubIntSplitHeader*>(compressed.get());
@@ -178,8 +187,11 @@ TEST(SubIntSplit64, SectionsFitTheThirtyTwoBitPool) {
 // silently produce garbage.
 TEST(SubIntSplit64, RejectsWidthMismatch) {
   const auto data = makeSnowflake64(1024);
-  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
-  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+  const auto tuple_count = static_cast<u32>(data.size());
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  SubIntSplit64 scheme;
+  SInteger64Stats stats = SInteger64Stats::generateStats(data.data(), nullptr, tuple_count);
+  scheme.compress(data.data(), nullptr, compressed.get(), stats, 3);
 
   std::vector<u32> decoded(data.size() + 64);
   ASSERT_THROW(SubIntSplitCore<u32>::decode(decoded.data(), compressed.get(),
@@ -191,7 +203,9 @@ TEST(SubIntSplit64, GatherMatchesDecompress) {
   const auto data = makeSnowflake64(20000);
   const auto tuple_count = static_cast<u32>(data.size());
   auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
-  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), tuple_count, 3);
+  SubIntSplit64 scheme;
+  SInteger64Stats stats = SInteger64Stats::generateStats(data.data(), nullptr, tuple_count);
+  scheme.compress(data.data(), nullptr, compressed.get(), stats, 3);
 
   std::mt19937 gen(37);
   std::vector<u32> positions(1024);
@@ -200,13 +214,13 @@ TEST(SubIntSplit64, GatherMatchesDecompress) {
   }
 
   std::vector<s64> gathered(positions.size());
-  SubIntSplit64::gather(gathered.data(), compressed.get(), tuple_count, positions.data(),
-                        static_cast<u32>(positions.size()), 0);
+  scheme.gather(gathered.data(), compressed.get(), nullptr, tuple_count, positions.data(),
+               static_cast<u32>(positions.size()), 0);
 
   for (std::size_t i = 0; i < positions.size(); i++) {
     ASSERT_EQ(gathered[i], data[positions[i]]) << "row " << positions[i];
   }
-  ASSERT_EQ(SubIntSplit64::lookupAt(compressed.get(), tuple_count, 4321, 0), data[4321]);
+  ASSERT_EQ(scheme.lookupAt(compressed.get(), nullptr, tuple_count, 4321, 0), data[4321]);
 }
 // -------------------------------------------------------------------------------------
 // The control arm the benchmark compares the planner against: the naive
@@ -220,10 +234,13 @@ TEST(SubIntSplit64, ForcedHalvesSplit) {
   EnforceSplitBoundaries enforcer(boundaries);
   roundTrip64(data);
 
-  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
-  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+  const auto tuple_count = static_cast<u32>(data.size());
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  SubIntSplit64 scheme;
+  SInteger64Stats stats = SInteger64Stats::generateStats(data.data(), nullptr, tuple_count);
+  scheme.compress(data.data(), nullptr, compressed.get(), stats, 3);
   ASSERT_EQ(SubIntSplit64::sectionCount(compressed.get()), 2);
-  ASSERT_NE(SubIntSplit64::fullDescription(compressed.get()).find("0-31;32-63"), std::string::npos);
+  ASSERT_NE(scheme.fullDescription(compressed.get()).find("0-31;32-63"), std::string::npos);
 }
 // -------------------------------------------------------------------------------------
 // The whole point: a planned split should beat the naive halves split on data
