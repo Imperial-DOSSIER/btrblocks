@@ -269,15 +269,16 @@ class SubIntSplitCore {
   // -----------------------------------------------------------------------------------
   // Materialize only the requested rows.
   //
-  // Each section is still decoded in full, because BtrBlocks sub-schemes expose
-  // no range or offset decode: BP and PFOR decompress a whole FastPFor array,
-  // DICT's codes are bit-packed, RLE has no run-offset index. So this saves the
-  // accumulation work for unwanted rows, not the sub-scheme work, and is a
-  // constant-factor win over decode() rather than an asymptotic one.
-  //
-  // The honest consequence -- SubIntSplit cannot offer real point access while
-  // its sub-schemes have none -- is recorded in docs/subintsplit.md rather than
-  // papered over here.
+  // Delegates per-section to the section's own scheme.gather() instead of a
+  // full decompress(): as of the random-access work on FOR, RLE,
+  // DynamicDictionary, Frequency, Truncation and FBP, most sections no longer
+  // need a full O(tuple_count) decode to answer a handful of positions, so
+  // SubIntSplit inherits that directly. Net cost per section is now whatever
+  // that section's own scheme achieves (see each scheme's gather() for its
+  // complexity), not O(tuple_count) -- the one exception being PFOR-coded
+  // sections, which still fall back to full decode inside PFOR itself (see
+  // extern/FastPFOR.hpp). Either way this composes automatically: SubIntSplit
+  // does not need to know which case it's in.
   static void gather(UT* dest,
                      const u8* src,
                      u32 tuple_count,
@@ -302,24 +303,25 @@ class SubIntSplitCore {
       return;
     }
 
-    INTEGER* scratch = decodeScratch(tuple_count, level);
+    INTEGER* scratch = gatherScratch(position_count, level);
 
     for (u8 s = 0; s < header.section_count; s++) {
       const auto& descriptor = descriptors[s];
       validate(descriptor, header.value_bits);
 
       auto& scheme = IntegerSchemePicker::MyTypeWrapper::getScheme(descriptor.scheme_code);
-      scheme.decompress(scratch, nullptr, payload + descriptor.offset, tuple_count, level + 1);
+      scheme.gather(scratch, payload + descriptor.offset, nullptr, tuple_count, positions,
+                   position_count, level + 1);
 
       const int shift = descriptor.bit_start;
       const UT mask = maskFor(descriptor.bit_end - descriptor.bit_start + 1);
       if (s == 0) {
         for (u32 i = 0; i < position_count; i++) {
-          dest[i] = (static_cast<UT>(static_cast<u32>(scratch[positions[i]])) & mask) << shift;
+          dest[i] = (static_cast<UT>(static_cast<u32>(scratch[i])) & mask) << shift;
         }
       } else {
         for (u32 i = 0; i < position_count; i++) {
-          dest[i] |= (static_cast<UT>(static_cast<u32>(scratch[positions[i]])) & mask) << shift;
+          dest[i] |= (static_cast<UT>(static_cast<u32>(scratch[i])) & mask) << shift;
         }
       }
     }
@@ -462,6 +464,16 @@ class SubIntSplitCore {
     // logical end of its output.
     thread_local std::vector<std::vector<INTEGER>> scratch;
     return get_level_data(scratch, tuple_count + SIMD_EXTRA_ELEMENTS(INTEGER), level);
+  }
+  // -----------------------------------------------------------------------------------
+  static INTEGER* gatherScratch(u32 position_count, u32 level) {
+    // No SIMD slack needed here: unlike decompress(), every scheme's gather()
+    // writes exactly position_count entries (see e.g. IntegerScheme::gather's
+    // default implementation), never a padded/rounded-up amount. A separate
+    // stack from decodeScratch's, since both may be live at once (e.g. a
+    // benchmark comparing decode() and gather() at the same level).
+    thread_local std::vector<std::vector<INTEGER>> scratch;
+    return get_level_data(scratch, position_count, level);
   }
 };
 // -------------------------------------------------------------------------------------

@@ -63,6 +63,15 @@ bool BtrReader::readColumn(std::vector<u8>& output_chunk_v, u32 index) {
       scheme.decompress(destination_array, bitmap, input_data, tuple_count, 0);
       break;
     }
+    case ColumnType::BIGINT: {
+      // Prepare destination array
+      auto destination_array = reinterpret_cast<BIGINT*>(output_chunk);
+
+      // Fetch the scheme from metadata
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
+      scheme.decompress(destination_array, bitmap, input_data, tuple_count, 0);
+      break;
+    }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
       requires_copy = scheme.decompressNoCopy(output_chunk, bitmap, input_data, tuple_count, 0);
@@ -150,6 +159,75 @@ INTEGER BtrReader::lookupColumn(u32 position) {
   return result;
 }
 // -------------------------------------------------------------------------------------
+void BtrReader::gatherColumn64(BIGINT* dest,
+                               const u32* positions,
+                               u32 position_count,
+                               u32* chunks_touched) {
+  if (chunks_touched != nullptr) {
+    *chunks_touched = 0;
+  }
+  if (position_count == 0) {
+    return;
+  }
+  if (this->getColumnType() != ColumnType::BIGINT) {
+    throw Generic_Exception("gatherColumn64 is only supported for BIGINT columns");
+  }
+
+  const u32 chunk_count = this->getChunkCount();
+
+  std::vector<u32> chunk_start(chunk_count + 1, 0);
+  for (u32 chunk_i = 0; chunk_i < chunk_count; chunk_i++) {
+    chunk_start[chunk_i + 1] = chunk_start[chunk_i] + this->getTupleCount(chunk_i);
+  }
+  const u32 total_tuples = chunk_start[chunk_count];
+
+  std::vector<std::vector<u32>> local_positions(chunk_count);
+  std::vector<std::vector<u32>> output_slots(chunk_count);
+  for (u32 i = 0; i < position_count; i++) {
+    const u32 position = positions[i];
+    if (position >= total_tuples) {
+      throw Generic_Exception("gatherColumn64 position out of range");
+    }
+    const auto it = std::upper_bound(chunk_start.begin(), chunk_start.end(), position);
+    const auto chunk_i = static_cast<u32>(std::distance(chunk_start.begin(), it) - 1);
+    local_positions[chunk_i].push_back(position - chunk_start[chunk_i]);
+    output_slots[chunk_i].push_back(i);
+  }
+
+  std::vector<BIGINT> chunk_results;
+  u32 touched = 0;
+  for (u32 chunk_i = 0; chunk_i < chunk_count; chunk_i++) {
+    if (local_positions[chunk_i].empty()) {
+      continue;
+    }
+    touched++;
+
+    auto meta = this->getChunkMetadata(chunk_i);
+    auto input_data = static_cast<const u8*>(meta->data);
+    BitmapWrapper* bitmap = this->getBitmap(chunk_i);
+    auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
+
+    const auto count = static_cast<u32>(local_positions[chunk_i].size());
+    chunk_results.resize(count);
+    scheme.gather(chunk_results.data(), input_data, bitmap, meta->tuple_count,
+                  local_positions[chunk_i].data(), count, 0);
+
+    for (u32 j = 0; j < count; j++) {
+      dest[output_slots[chunk_i][j]] = chunk_results[j];
+    }
+  }
+
+  if (chunks_touched != nullptr) {
+    *chunks_touched = touched;
+  }
+}
+// -------------------------------------------------------------------------------------
+BIGINT BtrReader::lookupColumn64(u32 position) {
+  BIGINT result = 0;
+  this->gatherColumn64(&result, &position, 1);
+  return result;
+}
+// -------------------------------------------------------------------------------------
 string BtrReader::getSchemeDescription(u32 index) {
   auto meta = this->getChunkMetadata(index);
   u8 compression = meta->compression_type;
@@ -162,6 +240,10 @@ string BtrReader::getSchemeDescription(u32 index) {
     }
     case ColumnType::DOUBLE: {
       auto& scheme = DoubleSchemePicker::MyTypeWrapper::getScheme(compression);
+      return scheme.fullDescription(src);
+    }
+    case ColumnType::BIGINT: {
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(compression);
       return scheme.fullDescription(src);
     }
     case ColumnType::STRING: {
@@ -186,6 +268,10 @@ string BtrReader::getBasicSchemeDescription(u32 index) {
     }
     case ColumnType::DOUBLE: {
       auto& scheme = DoubleSchemePicker::MyTypeWrapper::getScheme(compression);
+      return scheme.selfDescription();
+    }
+    case ColumnType::BIGINT: {
+      auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(compression);
       return scheme.selfDescription();
     }
     case ColumnType::STRING: {
@@ -243,6 +329,9 @@ u32 BtrReader::getDecompressedSize(u32 index) {
     case ColumnType::DOUBLE: {
       return sizeof(DOUBLE) * meta->tuple_count;
     }
+    case ColumnType::BIGINT: {
+      return sizeof(BIGINT) * meta->tuple_count;
+    }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);
 
@@ -268,6 +357,9 @@ u32 BtrReader::getDecompressedDataSize(u32 index) {
     }
     case ColumnType::DOUBLE: {
       return sizeof(DOUBLE) * meta->tuple_count;
+    }
+    case ColumnType::BIGINT: {
+      return sizeof(BIGINT) * meta->tuple_count;
     }
     case ColumnType::STRING: {
       auto& scheme = StringSchemePicker::MyTypeWrapper::getScheme(meta->compression_type);

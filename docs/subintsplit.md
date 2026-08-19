@@ -28,17 +28,43 @@ values with a coarse exponent.
 
 - **32-bit** (`IntegerSchemeType::SUB_INT_SPLIT`) is a normal registered scheme, usable anywhere in
   the Relation/Datablock/BtrReader pipeline.
-- **64-bit** (`integers::SubIntSplit64`) is free-standing and driven directly, because BtrBlocks has
-  no 64-bit scheme hierarchy for it to join. Its sections are still compressed by the ordinary 32-bit
-  pool, so it competes against the same codecs.
-- **Opt-in.** `SUB_INT_SPLIT` is deliberately absent from `defaultIntegerSchemes()`, so existing
-  behaviour and benchmark numbers do not move unless it is enabled:
+- **64-bit** (`integers::SubIntSplit64`) is *also* a normal registered scheme now
+  (`Integer64SchemeType::SUB_INT_SPLIT`), reachable through the same Relation/Datablock/BtrReader
+  pipeline as any other `ColumnType::BIGINT` codec. It started out free-standing and driven directly,
+  because BtrBlocks originally had no 64-bit scheme hierarchy for it to join; that hierarchy
+  (`Integer64Scheme`, `scheme/CompressionScheme64.hpp`) was added later and `SubIntSplit64` was
+  promoted onto it. Its sections are still compressed by the ordinary 32-bit pool, so it competes
+  against the same codecs either way — that part of the design never changed.
+- **Opt-in.** `SUB_INT_SPLIT` is deliberately absent from both `defaultIntegerSchemes()` and
+  `defaultInteger64Schemes()`, so existing behaviour and benchmark numbers do not move unless it is
+  enabled:
 
 ```cpp
 BtrBlocksConfig::configure([](BtrBlocksConfig& config) {
   config.integers.schemes.enable(IntegerSchemeType::SUB_INT_SPLIT);
+  config.integers64.schemes.enable(Integer64SchemeType::SUB_INT_SPLIT);
 });
 ```
+
+### 64-bit support
+
+`ColumnType::BIGINT` is a full native column type now, not a bolt-on grafted onto the 32-bit path: it
+has its own scheme base class (`Integer64Scheme`, `scheme/CompressionScheme64.hpp`), its own scheme
+code space (`Integer64SchemeType`, `scheme/SchemeType.hpp`) and its own picker
+(`Integer64SchemePicker`). `Datablock::compress`/`decompress` and `BtrReader` (including
+`gatherColumn64`/`lookupColumn64`, the 64-bit siblings of `gatherColumn`/`lookupColumn`) dispatch on
+it exactly as they do for `INTEGER`. The registered `Integer64SchemeType` set is `UNCOMPRESSED`,
+`ONE_VALUE`, `DICT` (`DynamicDictionary64`), `RLE`, `BP` (splits each value into low/high 32-bit
+halves, each compressed through the ordinary 32-bit picker — the vendored FastPFOR library has no
+native 64-bit bit-packing), `FOR`, `TRUNCATION`, `DICTIONARY_8`/`DICTIONARY_16`, `FREQUENCY`, and
+`SUB_INT_SPLIT`. `FOR`, `TRUNCATION`, `DICTIONARY_8`/`16` and `SUB_INT_SPLIT` are legacy/opt-in, like
+their 32-bit counterparts.
+
+This means every `*64` codec — including `SubIntSplit64` — automatically inherits whatever
+random-access capability its composition provides: `BP64`'s `gather` delegates to whichever 32-bit
+scheme each half's picker chose, so it gets `FBP`'s mini-block gather (see below) for free; SubIntSplit64
+delegates per-section the same way. See `test/test-cases/RandomAccess64.cpp` for the cross-codec
+correctness sweep this enables at 64 bits, mirroring `RandomAccess.cpp` at 32.
 
 ## Wire format
 
@@ -133,14 +159,19 @@ virtual INTEGER lookupAt(const u8* src, BitmapWrapper* nullmap, u32 tuple_count,
                          u32 position, u32 level);
 ```
 
-The defaults decompress the chunk once into thread-local scratch and index it, so all thirteen
-existing schemes get a working implementation with no per-scheme work. `gather` is
+The defaults decompress the chunk once into thread-local scratch and index it, so every registered
+scheme gets a working implementation with no per-scheme work. `gather` is
 `O(tuple_count + position_count)`, never `O(position_count × tuple_count)`. `lookupAt` is left at
 `O(tuple_count)` per call rather than memoizing on `src` — that is the true cost of a point lookup
 against a scheme with no random access, and caching would be unsound since the caller may reuse the
 buffer.
 
-`Uncompressed`, `OneValue` and `SubIntSplit` override them.
+That default is no longer the whole story. Most 32-bit codecs, and every 64-bit codec through
+composition (see *64-bit support* above), now override `gather`/`lookupAt` with something better than
+"decode the chunk and index it" — see *Random-access cost by scheme family* below for exactly what
+each one buys. `Integer64Scheme` (`scheme/CompressionScheme64.hpp`) mirrors this interface exactly,
+`s64`/`SInteger64Stats`/`Integer64SchemeType` in place of `INTEGER`/`SInteger32Stats`/
+`IntegerSchemeType`, with the same default-then-override structure.
 
 **Per column**, on `BtrReader`:
 
@@ -148,18 +179,42 @@ buffer.
 void gatherColumn(INTEGER* dest, const u32* positions, u32 position_count,
                   u32* chunks_touched = nullptr);
 INTEGER lookupColumn(u32 position);
+// and the BIGINT siblings:
+void gatherColumn64(BIGINT* dest, const u32* positions, u32 position_count,
+                    u32* chunks_touched = nullptr);
+BIGINT lookupColumn64(u32 position);
 ```
 
 A column is stored as independently-compressed chunks, each recording its own scheme, so a scheme
-instance only ever sees one chunk. `gatherColumn` buckets global positions by chunk and calls each
-touched chunk's `gather` once, dispatching on that chunk's own `compression_type` exactly as
-`readColumn` does. It therefore works for every registered scheme and picks up any native override
-for free.
+instance only ever sees one chunk. `gatherColumn`/`gatherColumn64` bucket global positions by chunk
+and call each touched chunk's `gather` once, dispatching on that chunk's own `compression_type`
+exactly as `readColumn` does. They therefore work for every registered scheme (32- and 64-bit alike)
+and pick up any native override for free.
 
 `chunks_touched` is reported because it, not the row count, is what a gather costs.
 
-Scope: `IntegerScheme` only. `DoubleScheme` would be a mechanical addition; `StringScheme` is a
-different problem (variable length, `decompressNoCopy`).
+Scope: `IntegerScheme`/`Integer64Scheme` only. `DoubleScheme` would be a mechanical addition;
+`StringScheme` is a different problem (variable length, `decompressNoCopy`).
+
+### Random-access cost by scheme family
+
+What each family's `gather`/`lookupAt` override actually costs, now that most of them have one. This
+supersedes the old blanket claim that nothing but `Uncompressed`/`OneValue` had real random access.
+
+| Family | Cost | Why |
+|---|---|---|
+| `Uncompressed`, `Uncompressed64` | `O(1)` | Values are stored verbatim; a lookup is a direct index. |
+| `OneValue`, `OneValue64` | `O(1)` | Every row holds the same value; a lookup never touches storage. |
+| `Dictionary8`/`16`, `Dictionary8_64`/`16_64` | `O(1)` | Fixed-width codes into a fixed-width dictionary — a code lookup, then a dictionary lookup, both direct indexing. |
+| `Truncation8`/`16`, `Truncation64` | `O(1)` | A fixed-width biased code; add the base back. Previously write-only (`ITruncDecompress` was a bare `UNREACHABLE()`) — see `docs/subintsplit-porting.md`. |
+| `FOR`, `FOR64` | `O(child)` | A bias wrapper: `gather`/`lookupAt` delegate to the child scheme, then add the bias back. Costs whatever the child costs. |
+| `RLE`, `RLE64` | `O(log runs + child)` | A run-offset index (binary search over run boundaries) locates which run a row falls in, then one child lookup for that run's value. |
+| `DynamicDictionary`, `DynamicDictionary64` | `O(child code lookup)` | Codes are themselves compressed by a nested scheme (not fixed-width, unlike `Dictionary8/16`), so a lookup costs one child `lookupAt` for the code plus a dictionary-slot read. |
+| `Frequency`, `Frequency64` | `O(1)` typical, `O(log exceptions)` worst case | The dominant value is O(1); an exception position is located via a roaring bitmap's `rank`/`contains`, which is sublinear in the exception count. |
+| `FBP`/`BP` (`FastPFOR`-backed bit-packing), `BP64` | `O(mini-block)` | FastPFOR's fixed-size blocks let a single value be unpacked from one mini-block without decoding the rest of the array — new methods added to the FastPFOR wrapper (`extern/FastPFOR.hpp`/`.cpp`) expose this. `BP64` inherits it automatically: it delegates to whichever 32-bit scheme each half's picker chose. |
+| `PFOR` (`SIMDFastPFor`-backed) | `O(tuple_count)` — no override | Deliberately **not** given mini-block access. `PFOR`'s per-page patched-exception layout (exceptions stored out-of-line, patched back in during a full decode) does not offer the same cheap fixed-block structure `FBP` has; giving it real random access would mean re-deriving which page a row's exception patch belongs to without decoding the page, which is a materially bigger change than the other schemes here needed. Left as a deliberate scope decision rather than attempted and abandoned. |
+| `SubIntSplit`, `SubIntSplit64` | Sum of each section's cost | `gather` delegates per-section to that section's own (now-improved) `gather` rather than decoding the whole value — see `SubIntSplitCore::gather` in `scheme/integer/subintsplit/SubIntSplitCore.hpp`. A lookup costs the sum of each section's own lookup cost, not a full-value decode. This is the change that makes the *Speed* results below possible; the old design decoded every section on every lookup regardless of what each section's own scheme could do. |
+| Everything else | `O(tuple_count + position_count)` for `gather`, `O(tuple_count)` per `lookupAt` | The framework default: decode the chunk into thread-local scratch and index it. |
 
 ## Datasets
 
@@ -266,37 +321,52 @@ quote; the generated `snowflake` is an upper bound, because its timestamp field 
 | `SIS_HALVES` | — | 2.63 | 2.09 | 1.00 |
 | **`SIS_PLANNED`** | — | **4.11** | **4.29** | 1.00 |
 | **64-bit** | | | | |
-| `RAW64` | 1.00 | 1.00 | 1.00 | 1.00 |
-| `SIS64_HALVES` | 1.09 | 2.06 | 2.87 | 1.00 |
-| **`SIS64_PLANNED`** | **1.55** | **6.29** | **8.58** | 1.00 |
+| `UNCOMPRESSED64` | 1.00 | 1.00 | 1.00 | 1.00 |
+| `BP64` | 1.09 | 1.09 | 2.06 | 1.00 |
+| `FOR64` | 1.09 | 1.09 | 2.27 | 1.00 |
+| `RLE64` | 1.09 | 1.09 | 2.06 | 1.00 |
+| `AUTO_BASELINE64` | 1.09 | 1.09 | 2.06 | 1.00 |
+| `SIS64_HALVES` | 1.09 | 1.09 | 2.06 | 1.00 |
+| **`SIS64_PLANNED`** | **1.54** | **6.29** | **8.58** | 1.00 |
 
 `tweet_ids` is 64-bit only, matching the research harness: truncating a 64-bit snowflake to 32 bits
-would destroy the field structure under test.
+would destroy the field structure under test — hence the 32-bit rows have no `tweet_ids` entry, not
+because those codecs weren't run against it.
 
-Four things to read out of this.
+Five things to read out of this — regenerated end-to-end through the rewired `run64()` (Relation →
+Datablock → BtrReader, the same pipeline `run32()` always used; see *64-bit support* above), not
+carried over from before that existed.
 
-**On real data the scheme wins, but modestly: 1.55× where nothing else manages anything at all.**
-BtrBlocks has no 64-bit codec, so the alternative really is 1.00×. The gain is real but it is not the
-6.29× the generated snowflake suggests, and the generated figure should not be quoted as if it were.
-The gap is entirely explained by sampling density — see *Datasets*: the real timestamp field is
-near-unique per row, the generated one repeats in runs of 1,024.
+**On real data the scheme wins, but modestly: 1.54× against the best incumbent 64-bit codec's 1.09×.**
+Unlike when this was first measured, BtrBlocks now *has* real 64-bit codecs to compare against —
+`BP64`/`FOR64`/`RLE64` are registered `Integer64Scheme`s, not a hypothetical — and `AUTO_BASELINE64`
+(the picker with SubIntSplit excluded) already lands on `BP64`'s 1.09× on its own. So the honest
+baseline is 1.09×, not 1.00×, and SubIntSplit's real contribution on real data is that gap: roughly
+1.4× on top of what BtrBlocks already does. The generated snowflake's 6.29× is still not the number to
+quote for real data — see *Datasets* for why: the real timestamp field is near-unique per row, the
+generated one repeats in runs of 1,024.
 
 **Choosing where to split is worth most of the benefit, and more so on real data.** At 64 bits the
-planner reaches 6.29× against the fixed halves split's 2.06× on generated data, and 1.55× against
-1.09× on real. On the real column the fixed split recovers almost nothing (1.09×), because Twitter's
-field boundaries — 12, 17, 22 — are nowhere near bit 32. That is the case a fixed split structurally
-cannot serve, and it is why the planner exists.
+planner reaches 6.29× against the fixed halves split's 1.09× on generated data (the halves split
+doesn't even beat plain `BP64` here, since Instagram's synthetic boundaries don't land on bit 32
+either), and 1.54× against 1.09× on real. On the real column the fixed split recovers nothing beyond
+what `BP64` already gets, because Twitter's field boundaries — 12, 17, 22 — are nowhere near bit 32.
+That is the case a fixed split structurally cannot serve, and it is why the planner exists.
 
-**The gain over the incumbent is large because the incumbent has nothing to work with.** Bit-packing
-a snowflake is bounded by the timestamp's magnitude, so `BP` and `PFOR` manage 1.1×. That is not a
-weakness of those schemes; it is what motivates splitting the value in the first place.
+**The gain over the incumbent is large on generated data because the incumbent has less to work with
+there.** Bit-packing a snowflake is bounded by the timestamp's magnitude, so 32-bit `BP`/`PFOR` manage
+1.1× and 64-bit `BP64`/`FOR64`/`RLE64` all land within noise of 1.09×. That is not a weakness of those
+schemes; it is what motivates splitting the value in the first place.
 
 **Uniform data yields exactly 1.00 for every codec, including this one.** There is no bit-range
 structure to find, the planner declines to split, and the size bound keeps a bad plan from ever being
 worse than raw. A number above 1.00 there would mean the planner was fooling itself.
 
-`AUTO_WITH_SIS` matches `SIS_PLANNED` on every dataset, so the picker does select the scheme when it
-is available — though see limitation 5 before relying on that.
+`AUTO_WITH_SIS64` matches `SIS64_PLANNED` on every dataset measured (1.543 vs 1.539 on `tweet_ids`,
+identical elsewhere — the small `tweet_ids` gap is run-to-run planner sampling noise, see the caveat
+in *Where the bytes actually go*), so the picker does select the scheme when it is available — though
+see limitation 5 before relying on that. This now holds at both widths: `AUTO_WITH_SIS` (32-bit) and
+`AUTO_WITH_SIS64` behave the same way.
 
 ### The planner recovers the real field layout
 
@@ -365,37 +435,43 @@ proportions rather than exact byte counts.
 
 ### Speed
 
-Snowflake, `block_size = 65536`, milliseconds. Gather is 4096 clustered positions; point access is
-256 individual lookups.
+Regenerated after the random-access work (`tools/subintsplit/run_benchmarks.sh`, 1,048,576 rows).
+Snowflake, `block_size = 65536`, milliseconds. Gather is the clustered trace (1% selectivity, mean run
+64); point access is 256 individual lookups.
 
 | | encode | bulk decode | gather | point (256) |
 |---|---|---|---|---|
-| `UNCOMPRESSED` | 279 | 0.55 | 0.11 | 0.07 |
-| `PFOR` | 372 | 1.07 | 0.68 | 7.95 |
-| `BP` | 369 | 1.70 | 1.44 | 15.90 |
-| `RLE` | 900 | 5.55 | 5.47 | 129.92 |
-| `AUTO_BASELINE` | 376 | 1.37 | 1.15 | 17.91 |
-| `SIS_PLANNED` (32) | 1570 | 5.38 | 4.45 | 53.42 |
-| `SIS64_PLANNED` | 1383 | 7.40 | 3.46 | 51.75 |
-| `SIS64_PLANNED` on `tweet_ids` | 2462 | 8.24 | 5.24 | 70.46 |
+| `UNCOMPRESSED` | 215 | 0.54 | 0.11 | 0.07 |
+| `PFOR` | 220 | 0.49 | 0.34 | 3.73 |
+| `BP` | 217 | 0.83 | 0.64 | 0.48 |
+| `RLE` | 436 | 2.49 | 2.20 | 10.90 |
+| `AUTO_BASELINE` | 220 | 0.80 | 0.64 | 0.48 |
+| `SIS_PLANNED` (32) | 672 | 1.74 | 1.24 | 1.25 |
+| `SIS64_PLANNED` | 1363 | 4.40 | 1.83 | 1.87 |
+| `SIS64_PLANNED` on `tweet_ids` | 2343 | 8.15 | 3.67 | 4.71 |
 
-Encode is 4× the incumbent and gets worse as blocks shrink, because planning runs per chunk: at
-`block_size = 4096` the same column costs 8337 ms against 621 ms, tracking the chunk count almost
-exactly. Bulk decode is roughly 4× the incumbent, which is the per-section pass structure of
-limitation 1.
+Encode is roughly 3× the incumbent and gets worse as blocks shrink, because planning runs per chunk
+(see the block-size table below). Bulk decode is still the per-section pass structure of limitation 1
+(each section is a full decode pass), so it stays a few times the incumbent's.
 
 **Every cost scales with the section count, so the real column is the more expensive one.** The
-planner picks 7 sections for `tweet_ids` against 5 for the generated snowflake, 4 for `increasing` and
-2 for `uniform` — and encode, decode and point access all track that. Worst case is `tweet_ids` at
-`block_size = 4096`, where 7 sections planned across 256 chunks costs **36 seconds** to encode a
-million rows. Anyone benchmarking encode throughput should lower `max_sections`, which trades ratio
-for time directly.
+planner picks 7 sections for `tweet_ids` against 5 for the generated snowflake — the same shape as
+before this work; splitting itself did not change. Anyone benchmarking encode throughput should lower
+`max_sections`, which trades ratio for time directly.
 
-Point access is the honest negative result, and it is worse than parity: `SIS_PLANNED` costs 53 ms
-against `PFOR`'s 8 ms, and 70 ms on the real column with its 7 sections, because every lookup decodes
-*all* sections rather than one stream. `UNCOMPRESSED` at 0.07 ms is the only thing here doing real
-random access. Bit-range splitting cannot help point workloads while the sub-schemes it delegates to
-have no random access of their own — see limitation 3.
+**Point access is no longer the outlier it was.** Two things moved it, and it's worth separating them:
+`BP`'s own point access dropped from a full-chunk decode to 0.48 ms once it got mini-block `gather`
+(this branch's FBP mini-block work) — plain BP, unrelated to SubIntSplit. On top of that,
+`SIS_PLANNED`'s point access dropped from 53 ms to 1.25 ms and `SIS64_PLANNED` on the real `tweet_ids`
+column from 70 ms to 4.71 ms, because `SubIntSplitCore::gather` now delegates per-section to each
+section's own (also-improved) `gather` instead of decoding every section on every lookup. SubIntSplit
+is still slower than a single-stream scheme at point access — `SIS64_PLANNED` costs about 10× `BP64`'s
+0.86 ms on `tweet_ids`, since a lookup composes several sections' costs instead of paying one — but the
+gap closed from roughly two orders of magnitude to one, and it is no longer *worse* than `PFOR`
+(3.73 ms), which has no mini-block access at all (a deliberate scope decision — see the random-access
+cost table above). `RLE`'s point access also dropped an order of magnitude (129.92 ms → 10.90 ms) from
+its own run-offset index. `PFOR` and `UNCOMPRESSED` are essentially unchanged, as expected: neither
+was touched by this work.
 
 ### Block size
 
@@ -403,9 +479,9 @@ Snowflake, 64-bit planned split.
 
 | `block_size` | ratio | encode ms | decode ms | gather ms |
 |---|---|---|---|---|
-| 4096 | 6.92 | 30174 | 6.45 | 1.33 |
-| 8192 | 7.05 | 8904 | 5.40 | 1.72 |
-| 65536 | 6.29 | 1383 | 7.40 | 3.46 |
+| 4096 | 6.91 | 24333 | 4.99 | 1.61 |
+| 8192 | 7.05 | 7456 | 3.60 | 1.22 |
+| 65536 | 6.29 | 1363 | 4.40 | 1.83 |
 
 Smaller blocks improve decode and gather — the working set stays cache-resident, and a gather pays
 for less of each chunk it barely touches — while costing dramatically more to encode, since the
@@ -453,25 +529,33 @@ an RLE stream's run values do not: they stay four bytes wide regardless of secti
 This also forces the planner's cost models to charge 32 bits per value for every section, which is
 less accurate than it could be. A width-parameterised sub-stream interface would recover both.
 
-### 3. There is no point-access win
+### 3. Point access is no longer a structural dead end, but it is not free
 
-SubIntSplit's `lookupAt` could only be O(1) if every section's sub-scheme were, and none are: BP and
-PFOR decompress a whole FastPFor array, DICT's codes are bit-packed, RLE has no run-offset index. Of
-the default set only `UNCOMPRESSED` and `ONE_VALUE` support O(1) access — that is, exactly when
-nothing is being compressed.
+This used to be titled "there is no point-access win" and said flatly that a point lookup cost a full
+chunk decode for every scheme except `UNCOMPRESSED`/`ONE_VALUE`, and that SubIntSplit made it *worse*
+by decoding every section on every lookup regardless of what each section's own scheme could do.
+Measured then: 53 ms for 256 lookups against `PFOR`'s 8 ms.
 
-So a point lookup costs a chunk decode for every scheme here. For SubIntSplit it costs rather more
-than that: each lookup decodes *every* section, so the cost is roughly the section count times a
-single-stream scheme's. Measured, 53 ms against `PFOR`'s 8 ms for 256 lookups. Splitting makes point
-access worse, not better, and no amount of tuning inside this scheme changes that.
+That premise is gone. Most 32-bit schemes, and every 64-bit scheme through composition, now have a
+real `gather`/`lookupAt` override instead of the decode-and-index default — see *Random-access cost by
+scheme family* above for what each family actually costs. `SubIntSplitCore::gather` was rewritten to
+delegate per-section to each section's own (now-improved) `gather`, rather than decoding the whole
+value, so a SubIntSplit lookup now costs the *sum* of its sections' own lookup costs instead of a
+full-value decode repeated per section.
 
-`gather` fares better because the sections are decoded once for the whole batch rather than once per
-row, but it is still a constant-factor saving on the accumulation work, not real random access.
+The honest characterization now is a tradeoff, not a dead end: SubIntSplit's point access is
+competitive with `BP`/`FBP` where its sections land on schemes with cheap random access (`BP`'s own
+mini-block gather, fixed dictionaries, `FOR`), and it is still slower than a single-stream scheme
+would be, because a lookup composes several sections' costs instead of paying one. See the *Speed*
+section below for regenerated measurements against this design.
 
-This is reported rather than papered over because it says something concrete about what BtrBlocks
-would need first: bit-range splitting cannot pay off on point workloads until the sub-schemes it
-delegates to can address a row without materializing the chunk. That is the same missing capability
-as limitation 1, seen from the other end.
+One thing did *not* change: `PFOR` (the `SIMDFastPFor`-backed scheme) still has no mini-block
+`gather`. That was a deliberate scope decision, not an oversight — see the `PFOR` row in *Random-access
+cost by scheme family* above for why its per-page patched-exception layout doesn't offer the same
+cheap structure `FBP`'s fixed blocks do. A section that lands on `PFOR` still falls back to the
+decode-and-index default, so SubIntSplit's point-access story depends in part on the picker
+preferring `BP` (which it typically does for the ranges this scheme carves out — see *Where the bytes
+actually go* below).
 
 ### 4. Planning is expensive
 
@@ -532,12 +616,16 @@ Tests:
 
 ```
 cmake --build build -j --target tester
-./build/tester --gtest_filter='SubIntSplit*:RandomAccess*'
+./build/tester --gtest_filter='SubIntSplit*:RandomAccess*:Integer64Picker*'
 ```
 
 The selection layer has no dependency on schemes or the wire format, so its tests
-(`SubIntSplitSelector`) run standalone. `RandomAccess` is parametrised over every registered integer
-scheme, which is what keeps the random-access API honest as a cross-codec baseline.
+(`SubIntSplitSelector`) run standalone. `RandomAccess` (32-bit, `test/test-cases/RandomAccess.cpp`)
+and `RandomAccess64` (64-bit, `test/test-cases/RandomAccess64.cpp`) are each parametrised over every
+registered scheme of their width, which is what keeps the random-access API honest as a cross-codec
+baseline. `Integer64Picker` checks that `Integer64SchemePicker` (via the real
+Relation/Datablock/BtrReader pipeline) selects sensible schemes for representative `BIGINT` shapes
+rather than always falling back to `UNCOMPRESSED`.
 
 ## Files
 
@@ -550,11 +638,14 @@ scheme, which is what keeps the random-access API honest as a cross-codec baseli
 | `btrblocks/scheme/integer/subintsplit/Plan.hpp` | Plan types, boundary strings, forced boundaries |
 | `btrblocks/scheme/integer/subintsplit/SubIntSplitCore.hpp` | Wire format, encode, decode, gather |
 | `btrblocks/scheme/integer/SubIntSplit.{hpp,cpp}` | The registered 32-bit scheme |
-| `btrblocks/scheme/integer/SubIntSplit64.{hpp,cpp}` | The free-standing 64-bit variant |
+| `btrblocks/scheme/integer/SubIntSplit64.{hpp,cpp}` | The registered 64-bit scheme (`Integer64SchemeType::SUB_INT_SPLIT`) |
+| `btrblocks/scheme/CompressionScheme64.hpp/.cpp` | `Integer64Scheme`, the base class every `*64` codec (including `SubIntSplit64`) implements |
+| `btrblocks/scheme/integer64/` | The other registered `Integer64Scheme` codecs: `Uncompressed64`, `OneValue64`, `BP64`, `FOR64`, `RLE64`, `DynamicDictionary64`, `Dictionary8_64`/`16_64`, `Frequency64`, `Truncation64` |
 | `tools/subintsplit/` | Benchmark driver, generators, traces |
 | `tools/subintsplit/parquet_to_i64.py` | One-off Parquet → flat int64 conversion for the real dataset |
 | `tools/subintsplit/run_benchmarks.sh` | Runs the sweep and renders the tables |
 | `tools/subintsplit/make_tables.py` | CSVs → the comparison tables in `benchmark-results/` |
+| `test/test-cases/RandomAccess.cpp` / `RandomAccess64.cpp` | Cross-codec gather/lookupAt correctness, 32- and 64-bit |
 | `docs/subintsplit-porting.md` | Deviations from the Nimble original |
 | `docs/subintsplit-results.csv` | Raw output behind the tables above |
 | `docs/subintsplit-sections.csv` | Per-section breakdown of each plan |

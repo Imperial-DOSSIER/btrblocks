@@ -170,16 +170,42 @@ the value at the maximum section width, which always yields a legal plan.
 
 ## Pre-existing BtrBlocks issues found while doing this
 
-Neither is caused by this change, and neither is fixed by it.
+Both were found while porting the split-selection layer and were **not** fixed as part of it — but
+both were fixed later, in the random-access/int64 work that builds on top of this port. Recorded here
+for anyone re-syncing against upstream who runs into either symptom in an older checkout.
 
-- **`TRUNCATION_8` and `TRUNCATION_16` are write-only.** `ITruncCompress` is implemented and
-  `ITruncExpectedCF` advertises a positive ratio whenever the value range fits the code type, but
-  `ITruncDecompress` (`scheme/integer/Truncation.hpp`) is a bare `UNREACHABLE()` — which expands to
-  `__builtin_unreachable()`, undefined behaviour rather than a trap. Enabling them lets the picker
-  cascade a sub-stream into a scheme that can never read it back; the observed symptom is a smashed
-  stack during decompress. `test/test-cases/RandomAccess.cpp` excludes them for this reason.
-- **`FBP64::compress`** (`scheme/integer/PBP.cpp`) passes `tuple_count` as the element count to a
-  `u32` codec for an array of `tuple_count` `u64`s, so it compresses only the first half of the
-  buffer, and `decompress` writes `tuple_count` `u32`s. Nothing calls it. It was considered as a
-  64-bit baseline for the benchmark and rejected for this reason; the benchmark uses a raw copy as
-  its 64-bit floor instead.
+- **`TRUNCATION_8` and `TRUNCATION_16` were write-only.** `ITruncCompress` is implemented and
+  `ITruncExpectedCF` advertised a positive ratio whenever the value range fit the code type, but
+  `ITruncDecompress` (`scheme/integer/Truncation.hpp`) was a bare `UNREACHABLE()` — which expands to
+  `__builtin_unreachable()`, undefined behaviour rather than a trap. Enabling them let the picker
+  cascade a sub-stream into a scheme that could never read it back; the observed symptom was a smashed
+  stack during decompress. `test/test-cases/RandomAccess.cpp` excluded them for this reason.
+  **Fixed in `d93c723` ("fix(truncation): implement ITruncDecompress instead of bare
+  UNREACHABLE()")**, part of giving the 32-bit integer schemes real `gather`/`lookupAt`. `Truncation8`
+  and `Truncation16` are back in `RandomAccess.cpp`'s "every scheme" sweep as a result, and gained a
+  real, addressable decode path (see `docs/subintsplit.md`'s random-access section).
+- **`FBP64::compress`** (`scheme/integer/PBP.cpp`) passed `tuple_count` as the element count to a
+  `u32` codec for an array of `tuple_count` `u64`s, so it compressed only the first half of the
+  buffer, and `decompress` wrote `tuple_count` `u32`s. Nothing called it. It was considered as a
+  64-bit baseline for the benchmark and rejected for this reason; the benchmark used a raw copy as
+  its 64-bit floor instead. **Removed (not fixed in place) in `a3616ac` ("feat(int64): add FOR64 and
+  BP64, remove dead/buggy free-standing FBP64")**: the native `BP64` added in that commit (a real
+  `Integer64Scheme`, splitting each value into low/high 32-bit halves compressed independently
+  through the ordinary 32-bit `BP`/`FBP`) supersedes it entirely, so there was nothing left worth
+  patching in the old free-standing function.
+
+### `SubIntSplit64` is no longer free-standing
+
+At the time this file was written, `integers::SubIntSplit64` was a free-standing class driven
+directly (constructing an instance, calling `compress`/`decompress` by hand) because BtrBlocks had no
+64-bit scheme hierarchy for it to join — see the "encode/decode path is not a port" note above, which
+still describes `SubIntSplitCore.hpp` accurately.
+
+That changed in `9d07157` ("feat(int64): promote SubIntSplit64 to a registered Integer64Scheme"):
+`SubIntSplit64` is now a normal `Integer64Scheme` subclass, registered under
+`Integer64SchemeType::SUB_INT_SPLIT` (opt-in, exactly like the 32-bit scheme), reachable through
+`Datablock::compress`/`decompress`, `BtrReader`, and `Integer64SchemePicker::chooseScheme` like any
+other `BIGINT` codec. Its sections are still compressed by the ordinary 32-bit scheme pool — that part
+of the design is unchanged — but the outer scheme itself is no longer a special case callers have to
+know about. See `scheme/CompressionScheme64.hpp` and `docs/subintsplit.md`'s "Status and scope"
+section for the current picture.

@@ -60,6 +60,8 @@ using SMALLINT = s16;
 using INTEGER = s32;  // we use FOR always at the beginning so negative integers
                       // will be handled out
 using UINTEGER = u32;
+using BIGINT = s64;   // native 64-bit integer scheme path (ColumnType::BIGINT)
+using UBIGINT = u64;
 using DOUBLE = double;
 using STRING = string;
 using BITMAP = u8;
@@ -73,6 +75,8 @@ inline ColumnType ConvertStringToType(const string& type_str) {
     return ColumnType::DOUBLE;
   } else if (type_str == "string") {
     return ColumnType::STRING;
+  } else if (type_str == "bigint") {
+    return ColumnType::BIGINT;
   } else {
     return ColumnType::SKIP;
   }
@@ -85,6 +89,8 @@ inline string ConvertTypeToString(const ColumnType type_str) {
     return "double";
   } else if (type_str == ColumnType::STRING) {
     return "string";
+  } else if (type_str == ColumnType::BIGINT) {
+    return "bigint";
   } else {
     UNREACHABLE();
     return "";

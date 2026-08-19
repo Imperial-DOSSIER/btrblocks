@@ -64,6 +64,35 @@ void FOR::decompress(INTEGER* dest,
   }
 }
 // -------------------------------------------------------------------------------------
+void FOR::gather(INTEGER* dest,
+                 const u8* src,
+                 BitmapWrapper* nullmap,
+                 u32 tuple_count,
+                 const u32* positions,
+                 u32 position_count,
+                 u32 level) {
+  if (tuple_count == 0 || position_count == 0) {
+    return;
+  }
+  const auto& col_struct = *reinterpret_cast<const FORStructure*>(src);
+  IntegerSchemePicker::MyTypeWrapper::getScheme(col_struct.next_scheme)
+      .gather(dest, col_struct.data, nullmap, tuple_count, positions, position_count, level + 1);
+  // -------------------------------------------------------------------------------------
+  if (nullmap != nullptr && nullmap->type() == BitmapType::ALLZEROS) {
+    // Everything is null, no point in writing anything
+    return;
+  }
+  for (u32 i = 0; i < position_count; i++) {
+    dest[i] += col_struct.bias;
+  }
+}
+// -------------------------------------------------------------------------------------
+INTEGER FOR::lookupAt(const u8* src, BitmapWrapper* nullmap, u32 tuple_count, u32 position, u32 level) {
+  INTEGER result = 0;
+  this->gather(&result, src, nullmap, tuple_count, &position, 1, level);
+  return result;
+}
+// -------------------------------------------------------------------------------------
 INTEGER FOR::lookup(u32) {
   UNREACHABLE();
 }

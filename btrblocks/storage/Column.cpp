@@ -20,6 +20,9 @@ Column::Column(const ColumnType type,
     case ColumnType::STRING:
       data.emplace<2>(data_path.c_str());
       break;
+    case ColumnType::BIGINT:
+      data.emplace<3>(data_path.c_str());
+      break;
     default:
       UNREACHABLE();
       break;
@@ -35,6 +38,8 @@ Column::Column(string name, Data&& data, Vector<BITMAP>&& bitmap)
           return ColumnType::DOUBLE;
         } else if (std::holds_alternative<Vector<str>>(d)) {
           return ColumnType::STRING;
+        } else if (std::holds_alternative<Vector<BIGINT>>(d)) {
+          return ColumnType::BIGINT;
         } else {
           UNREACHABLE();
         }
@@ -60,6 +65,10 @@ const Vector<str>& Column::strings() const {
   return std::get<2>(data);
 }
 // -------------------------------------------------------------------------------------
+const Vector<BIGINT>& Column::bigints() const {
+  return std::get<3>(data);
+}
+// -------------------------------------------------------------------------------------
 const Vector<BITMAP>& Column::bitmaps() const {
   return bitmap;
 }
@@ -78,6 +87,9 @@ SIZE Column::sizeInBytes() const {
       break;
     case ColumnType::STRING:
       return strings().fileSize;
+      break;
+    case ColumnType::BIGINT:
+      return bigints().size() * sizeof(BIGINT);
       break;
     default:
       UNREACHABLE();

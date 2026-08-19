@@ -26,6 +26,22 @@ class Frequency : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  // Most positions hold the dominant value directly (O(1) roaring membership
+  // check); the rest are looked up by roaring rank -> exception index, then
+  // gathered from the exceptions sub-scheme in one batched call. Neither step
+  // is O(tuple_count), unlike the base class's full-chunk decode fallback.
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   std::string fullDescription(const u8* src) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::FREQUENCY; }

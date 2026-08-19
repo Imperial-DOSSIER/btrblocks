@@ -14,6 +14,7 @@ namespace btrblocks {
 // -------------------------------------------------------------------------------------
 using UInteger32Stats = NumberStats<u32>;
 using SInteger32Stats = NumberStats<s32>;
+using SInteger64Stats = NumberStats<s64>;
 using DoubleStats = NumberStats<DOUBLE>;
 // -------------------------------------------------------------------------------------
 struct Predicate {};

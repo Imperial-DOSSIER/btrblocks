@@ -1,9 +1,9 @@
 // ------------------------------------------------------------------------------
-#include "Frequency.hpp"
+#include "Frequency64.hpp"
 // ------------------------------------------------------------------------------
 #include "common/Units.hpp"
 #include "compression/SchemePicker.hpp"
-#include "scheme/CompressionScheme.hpp"
+#include "scheme/CompressionScheme64.hpp"
 #include "scheme/SchemeConfig.hpp"
 #include "scheme/templated/Frequency.hpp"
 #include "storage/Chunk.hpp"
@@ -12,53 +12,54 @@
 // -------------------------------------------------------------------------------------
 #include <cmath>
 // -------------------------------------------------------------------------------------
-namespace btrblocks::integers {
+namespace btrblocks::integers64 {
 // -------------------------------------------------------------------------------------
-using MyFrequency = TFrequency<INTEGER, IntegerScheme, SInteger32Stats, IntegerSchemeType>;
+using MyFrequency64 = TFrequency<s64, Integer64Scheme, SInteger64Stats, Integer64SchemeType>;
 // -------------------------------------------------------------------------------------
-double Frequency::expectedCompressionRatio(SInteger32Stats& stats, u8 allowed_cascading_level) {
+double Frequency64::expectedCompressionRatio(SInteger64Stats& stats, u8 allowed_cascading_level) {
+  // Shares the 32-bit threshold: there is no separate integers64 config
+  // section.
   if (CD(stats.unique_count) * 100.0 / CD(stats.tuple_count) >
       SchemeConfig::get().integers.frequency_threshold_pct) {
     return 0;
   }
-  return IntegerScheme::expectedCompressionRatio(stats, allowed_cascading_level);
+  return Integer64Scheme::expectedCompressionRatio(stats, allowed_cascading_level);
 }
 // -------------------------------------------------------------------------------------
-u32 Frequency::compress(const INTEGER* src,
-                        const BITMAP* nullmap,
-                        u8* dest,
-                        SInteger32Stats& stats,
-                        u8 allowed_cascading_level) {
-  return MyFrequency::compressColumn(src, nullmap, dest, stats, allowed_cascading_level);
+u32 Frequency64::compress(const BIGINT* src,
+                          const BITMAP* nullmap,
+                          u8* dest,
+                          SInteger64Stats& stats,
+                          u8 allowed_cascading_level) {
+  return MyFrequency64::compressColumn(src, nullmap, dest, stats, allowed_cascading_level);
 }
 // -------------------------------------------------------------------------------------
-void Frequency::decompress(INTEGER* dest,
-                           BitmapWrapper* nullmap,
-                           const u8* src,
-                           u32 tuple_count,
-                           u32 level) {
-  return MyFrequency::decompressColumn(dest, nullmap, src, tuple_count, level);
+void Frequency64::decompress(BIGINT* dest,
+                             BitmapWrapper* nullmap,
+                             const u8* src,
+                             u32 tuple_count,
+                             u32 level) {
+  return MyFrequency64::decompressColumn(dest, nullmap, src, tuple_count, level);
 }
-// -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
 namespace {
-thread_local std::vector<std::vector<INTEGER>> frequency_exceptions_scratch;
+thread_local std::vector<std::vector<BIGINT>> frequency64_exceptions_scratch;
 }  // namespace
 // -------------------------------------------------------------------------------------
-void Frequency::gather(INTEGER* dest,
-                       const u8* src,
-                       BitmapWrapper*,
-                       u32 tuple_count,
-                       const u32* positions,
-                       u32 position_count,
-                       u32 level) {
+void Frequency64::gather(BIGINT* dest,
+                         const u8* src,
+                         BitmapWrapper*,
+                         u32 tuple_count,
+                         const u32* positions,
+                         u32 position_count,
+                         u32 level) {
   if (tuple_count == 0 || position_count == 0) {
     return;
   }
-  // Same layout-compatibility note as DynamicDictionary: use the actual
+  // Same layout-compatibility note as DynamicDictionary64: use the actual
   // (also unpacked, but field-for-field identical) templated struct rather
   // than this file's own declaration, to make the wire format explicit.
-  const auto& col_struct = *reinterpret_cast<const ::btrblocks::FrequencyStructure<INTEGER>*>(src);
+  const auto& col_struct = *reinterpret_cast<const ::btrblocks::FrequencyStructure<s64>*>(src);
   Roaring exceptions_bitmap = Roaring::read(reinterpret_cast<const char*>(col_struct.data), false);
   const u64 cardinality = exceptions_bitmap.cardinality();
   if (cardinality == 0) {
@@ -81,9 +82,9 @@ void Frequency::gather(INTEGER* dest,
     }
   }
   if (!exception_ranks.empty()) {
-    auto& scheme = IntegerSchemePicker::MyTypeWrapper::getScheme(col_struct.next_scheme);
-    INTEGER* resolved =
-        get_level_data(frequency_exceptions_scratch, static_cast<u32>(exception_ranks.size()), level);
+    auto& scheme = Integer64SchemePicker::MyTypeWrapper::getScheme(col_struct.next_scheme);
+    BIGINT* resolved = get_level_data(frequency64_exceptions_scratch,
+                                      static_cast<u32>(exception_ranks.size()), level);
     scheme.gather(resolved, col_struct.data + col_struct.exceptions_offset, nullptr,
                  static_cast<u32>(cardinality), exception_ranks.data(),
                  static_cast<u32>(exception_ranks.size()), level + 1);
@@ -93,26 +94,26 @@ void Frequency::gather(INTEGER* dest,
   }
 }
 // -------------------------------------------------------------------------------------
-INTEGER Frequency::lookupAt(const u8* src,
-                            BitmapWrapper* nullmap,
-                            u32 tuple_count,
-                            u32 position,
-                            u32 level) {
-  INTEGER result = 0;
+BIGINT Frequency64::lookupAt(const u8* src,
+                             BitmapWrapper* nullmap,
+                             u32 tuple_count,
+                             u32 position,
+                             u32 level) {
+  BIGINT result = 0;
   this->gather(&result, src, nullmap, tuple_count, &position, 1, level);
   return result;
 }
 // -------------------------------------------------------------------------------------
-INTEGER Frequency::lookup(u32) {
+BIGINT Frequency64::lookup(u32) {
   UNREACHABLE();
 }
-void Frequency::scan(Predicate, BITMAP*, const u8*, u32) {
+void Frequency64::scan(Predicate, BITMAP*, const u8*, u32) {
   UNREACHABLE();
 }
 
-std::string Frequency::fullDescription(const u8* src) {
-  return MyFrequency::fullDescription(src, this->selfDescription());
+std::string Frequency64::fullDescription(const u8* src) {
+  return MyFrequency64::fullDescription(src, this->selfDescription());
 }
 // -------------------------------------------------------------------------------------
-}  // namespace btrblocks::integers
+}  // namespace btrblocks::integers64
 // -------------------------------------------------------------------------------------

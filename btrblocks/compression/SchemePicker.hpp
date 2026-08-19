@@ -253,6 +253,37 @@ class TypeWrapper<IntegerScheme, IntegerSchemeType> {
 };
 // -------------------------------------------------------------------------------------
 template <>
+class TypeWrapper<Integer64Scheme, Integer64SchemeType> {
+ public:
+  // -------------------------------------------------------------------------------------
+  static std::unordered_map<Integer64SchemeType, unique_ptr<Integer64Scheme>>& getSchemes() {
+    return SchemePool::available_schemes->integer64_schemes;
+  }
+  // -------------------------------------------------------------------------------------
+  static Integer64Scheme& getScheme(Integer64SchemeType code) { return *getSchemes()[code]; }
+  // -------------------------------------------------------------------------------------
+  static Integer64Scheme& getScheme(u8 code) {
+    return *getSchemes()[static_cast<Integer64SchemeType>(code)];
+  }
+  // -------------------------------------------------------------------------------------
+  static u8& getOverrideScheme() {
+    auto& ref = BtrBlocksConfig::get().integers64.override_scheme;
+    return reinterpret_cast<u8&>(ref);
+  }
+  // -------------------------------------------------------------------------------------
+  static inline string getTypeName() { return "BIGINT"; }
+  // -------------------------------------------------------------------------------------
+  constexpr static bool shouldUseFOR(BIGINT min) {
+    return enableFORScheme() && (Utils::getBitsNeeded(min) >= 8) &&
+           BtrBlocksConfig::get().integers64.schemes.isEnabled(Integer64SchemeType::FOR);
+  }
+  static Integer64Scheme& getFORScheme() { return getScheme(Integer64SchemeType::FOR); }
+  // -------------------------------------------------------------------------------------
+  static u8 maxCascadingLevel() { return BtrBlocksConfig::get().integers64.max_cascade_depth; }
+  // -------------------------------------------------------------------------------------
+};
+// -------------------------------------------------------------------------------------
+template <>
 class TypeWrapper<DoubleScheme, DoubleSchemeType> {
  public:
   // -------------------------------------------------------------------------------------
@@ -314,6 +345,8 @@ class TypeWrapper<StringScheme, StringSchemeType> {
 // -------------------------------------------------------------------------------------
 using IntegerSchemePicker =
     CSchemePicker<INTEGER, IntegerScheme, SInteger32Stats, IntegerSchemeType>;
+using Integer64SchemePicker =
+    CSchemePicker<BIGINT, Integer64Scheme, SInteger64Stats, Integer64SchemeType>;
 using DoubleSchemePicker = CSchemePicker<DOUBLE, DoubleScheme, DoubleStats, DoubleSchemeType>;
 using StringSchemePicker = CSchemePicker<str, StringScheme, StringStats, StringSchemeType>;
 }  // namespace btrblocks

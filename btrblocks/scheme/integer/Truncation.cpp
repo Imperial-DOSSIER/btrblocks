@@ -29,6 +29,24 @@ void Truncation16::decompress(INTEGER* dest,
   ITruncDecompress<u16>(dest, nullmap, src, tuple_count, level);
 }
 // -------------------------------------------------------------------------------------
+void Truncation16::gather(INTEGER* dest,
+                          const u8* src,
+                          BitmapWrapper*,
+                          u32 tuple_count,
+                          const u32* positions,
+                          u32 position_count,
+                          u32) {
+  ITruncGather<u16>(dest, src, tuple_count, positions, position_count);
+}
+INTEGER Truncation16::lookupAt(const u8* src, BitmapWrapper*, u32 tuple_count, u32 position, u32) {
+  if (tuple_count == 0) {
+    return 0;
+  }
+  INTEGER result = 0;
+  ITruncGather<u16>(&result, src, tuple_count, &position, 1);
+  return result;
+}
+// -------------------------------------------------------------------------------------
 INTEGER Truncation16::lookup(u32) {
   UNREACHABLE();
 }
@@ -56,6 +74,24 @@ void Truncation8::decompress(INTEGER* dest,
                              u32 tuple_count,
                              u32 level) {
   ITruncDecompress<u8>(dest, nullmap, src, tuple_count, level);
+}
+// -------------------------------------------------------------------------------------
+void Truncation8::gather(INTEGER* dest,
+                         const u8* src,
+                         BitmapWrapper*,
+                         u32 tuple_count,
+                         const u32* positions,
+                         u32 position_count,
+                         u32) {
+  ITruncGather<u8>(dest, src, tuple_count, positions, position_count);
+}
+INTEGER Truncation8::lookupAt(const u8* src, BitmapWrapper*, u32 tuple_count, u32 position, u32) {
+  if (tuple_count == 0) {
+    return 0;
+  }
+  INTEGER result = 0;
+  ITruncGather<u8>(&result, src, tuple_count, &position, 1);
+  return result;
 }
 // -------------------------------------------------------------------------------------
 void Truncation8::scan(Predicate, BITMAP*, const u8*, u32) {

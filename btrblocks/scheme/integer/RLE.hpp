@@ -31,6 +31,24 @@ class RLE : public IntegerScheme {
                   const u8* src,
                   u32 tuple_count,
                   u32 level) override;
+  // Builds a run-offset index from the (small) counts sub-stream -- O(runs)
+  // rather than O(tuple_count) -- binary-searches it per requested position to
+  // find the owning run, then gathers those run indices from the values
+  // sub-scheme in one batched call. Net cost is O(runs + log(runs) *
+  // position_count + values_child_gather_cost), instead of the base class's
+  // O(tuple_count) full-column decode.
+  void gather(INTEGER* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  INTEGER lookupAt(const u8* src,
+                   BitmapWrapper* nullmap,
+                   u32 tuple_count,
+                   u32 position,
+                   u32 level) override;
   std::string fullDescription(const u8* src) override;
   inline IntegerSchemeType schemeType() override { return staticSchemeType(); }
   inline static IntegerSchemeType staticSchemeType() { return IntegerSchemeType::RLE; }

@@ -1,62 +1,79 @@
 #pragma once
 // -------------------------------------------------------------------------------------
-#include "common/Units.hpp"
+#include "scheme/CompressionScheme64.hpp"
 // -------------------------------------------------------------------------------------
 #include <string>
 // -------------------------------------------------------------------------------------
 namespace btrblocks::integers {
 // -------------------------------------------------------------------------------------
-// SubIntSplit for 64-bit columns.
+// SubIntSplit for 64-bit columns, registered as a real Integer64Scheme
+// (Integer64SchemeType::SUB_INT_SPLIT) and selectable through
+// Integer64SchemePicker like every other *64 codec. Delegates entirely to the
+// existing, unmodified subintsplit::SubIntSplitCore<u64> -- the same core
+// that already backs the 32-bit SubIntSplit (SubIntSplitCore<u32>) -- so
+// nothing about the encoding, planning, or wire format changes here; this is
+// purely a wrapper promotion from free-standing statics to virtual overrides.
 //
-// BtrBlocks is 32-bit throughout -- INTEGER is s32, the stats, the picker, the
-// scheme interface and the storage layer all follow, and ColumnType::BIGINT is
-// marked out of scope -- so there is no 64-bit scheme hierarchy for this to
-// join. It is therefore free-standing, in the manner of FBP64, and is driven
-// directly rather than selected by the picker.
+// Sections are capped at 32 bits, so once a value is decomposed each section
+// is an ordinary INTEGER stream and the whole existing 32-bit scheme pool
+// compresses it. Only the extraction and accumulation loops are 64-bit;
+// everything between them is the 32-bit machinery unchanged.
 //
-// That costs less than it sounds. Sections are capped at 32 bits, so once a
-// value is decomposed each section is an ordinary INTEGER stream and the whole
-// existing scheme pool compresses it. Only the extraction and accumulation
-// loops are 64-bit; everything between them is the 32-bit machinery unchanged.
-//
-// Bit patterns are round-tripped, so signedness is irrelevant: values are taken
-// as u64 and never arithmetically manipulated.
+// Bit patterns are round-tripped, so signedness is irrelevant: values are
+// taken as u64 and never arithmetically manipulated.
 //
 // The value is not split into two 32-bit halves. Where the boundaries fall is
-// the entire question the planner answers, and 0-31/32-63 is just one candidate
-// answer among many -- one the benchmark uses as a control arm.
-class SubIntSplit64 {
+// the entire question the planner answers, and 0-31/32-63 is just one
+// candidate answer among many -- one the benchmark uses as a control arm.
+//
+// Opt-in only (not in defaultInteger64Schemes()), mirroring the 32-bit
+// SubIntSplit's opt-in status exactly.
+class SubIntSplit64 : public Integer64Scheme {
  public:
+  double expectedCompressionRatio(SInteger64Stats& stats, u8 allowed_cascading_level) override;
+  u32 compress(const BIGINT* src,
+               const BITMAP* nullmap,
+               u8* dest,
+               SInteger64Stats& stats,
+               u8 allowed_cascading_level) override;
+  void decompress(BIGINT* dest,
+                  BitmapWrapper* nullmap,
+                  const u8* src,
+                  u32 tuple_count,
+                  u32 level) override;
+  // Delegates per-section to each section's own scheme.gather() (see
+  // SubIntSplitCore::gather), so random access is exactly as good as the
+  // composition of its sections' own schemes -- not a fixed constant-factor
+  // win over decompress() anymore. See docs/subintsplit.md and
+  // integers::SubIntSplit::gather.
+  void gather(BIGINT* dest,
+              const u8* src,
+              BitmapWrapper* nullmap,
+              u32 tuple_count,
+              const u32* positions,
+              u32 position_count,
+              u32 level) override;
+  BIGINT lookupAt(const u8* src,
+                  BitmapWrapper* nullmap,
+                  u32 tuple_count,
+                  u32 position,
+                  u32 level) override;
+  std::string fullDescription(const u8* src) override;
+  inline Integer64SchemeType schemeType() override { return staticSchemeType(); }
+  inline static Integer64SchemeType staticSchemeType() { return Integer64SchemeType::SUB_INT_SPLIT; }
+  BIGINT lookup(u32) override;
+  void scan(Predicate, BITMAP*, const u8*, u32) override;
+
   // Bytes an encoding of `tuple_count` values can occupy at most, so callers
-  // can size a destination buffer. Encoding never exceeds this.
+  // can size a destination buffer. Encoding never exceeds this. Not part of
+  // the Integer64Scheme interface (no other scheme exposes a sizing bound),
+  // kept as a static utility for callers that need to size a buffer ahead of
+  // calling compress(), same as before this class existed.
   static u64 maxCompressedSize(u32 tuple_count);
 
-  // Returns the number of bytes written to `dest`.
-  static u32 compress(const s64* src,
-                      const BITMAP* nullmap,
-                      u8* dest,
-                      u32 tuple_count,
-                      u8 allowed_cascading_level);
-
-  static void decompress(s64* dest, const u8* src, u32 tuple_count, u32 level);
-
-  // Random access. `positions` are row indices in [0, tuple_count).
-  //
-  // Sections are decoded whole, because BtrBlocks sub-schemes have no range or
-  // offset decode, so this saves the accumulation work for unwanted rows but
-  // not the sub-scheme work. See docs/subintsplit.md.
-  static void gather(s64* dest,
-                     const u8* src,
-                     u32 tuple_count,
-                     const u32* positions,
-                     u32 position_count,
-                     u32 level);
-
-  static s64 lookupAt(const u8* src, u32 tuple_count, u32 position, u32 level);
-
-  // The split and the scheme chosen for each section.
-  static std::string fullDescription(const u8* src);
-
+  // The split and the scheme chosen for each section count. Static utilities
+  // for tooling/tests that want to introspect an already-encoded buffer
+  // without going through the picker.
   static u8 sectionCount(const u8* src);
 };
 // -------------------------------------------------------------------------------------
