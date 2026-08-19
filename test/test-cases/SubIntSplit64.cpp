@@ -1,0 +1,251 @@
+// -------------------------------------------------------------------------------------
+// Round-trip tests for the 64-bit SubIntSplit variant.
+//
+// BtrBlocks has no 64-bit scheme hierarchy, so this is driven directly rather
+// than through Relation/Datablock. Sections are still compressed by the
+// ordinary 32-bit scheme pool, which is the point of the design.
+// -------------------------------------------------------------------------------------
+#include "TestHelper.hpp"
+// -------------------------------------------------------------------------------------
+#include "btrblocks.hpp"
+#include "scheme/SchemePool.hpp"
+#include "scheme/integer/SubIntSplit64.hpp"
+#include "scheme/integer/subintsplit/Plan.hpp"
+#include "scheme/integer/subintsplit/SubIntSplitCore.hpp"
+// -------------------------------------------------------------------------------------
+#include "gtest/gtest.h"
+// -------------------------------------------------------------------------------------
+#include <cstdint>
+#include <limits>
+#include <random>
+#include <vector>
+// -------------------------------------------------------------------------------------
+using namespace btrblocks;
+using namespace btrblocks::integers;
+using namespace btrblocks::subintsplit;
+// -------------------------------------------------------------------------------------
+namespace {
+// -------------------------------------------------------------------------------------
+// The Instagram snowflake layout: 41-bit millisecond timestamp, 13-bit shard
+// id, 10-bit per-millisecond sequence, sign bit always zero.
+std::vector<s64> makeSnowflake64(std::size_t count, uint32_t seed = 1) {
+  std::mt19937_64 gen(seed);
+  std::vector<s64> values;
+  values.reserve(count);
+  uint64_t timestamp = 1700000000000ull;
+  uint64_t sequence = 0;
+  for (std::size_t i = 0; i < count; i++) {
+    const uint64_t shard = gen() % 16;
+    values.push_back(static_cast<s64>((timestamp << 23) | (shard << 10) | sequence));
+    if (++sequence == 1024) {
+      sequence = 0;
+      timestamp++;
+    }
+  }
+  return values;
+}
+// -------------------------------------------------------------------------------------
+// Round-trips through SubIntSplit64 and asserts every value returns. Returns
+// the encoded size in bytes.
+u32 roundTrip64(const std::vector<s64>& data, u8 cascade_level = 3) {
+  const auto tuple_count = static_cast<u32>(data.size());
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  const u32 size =
+      SubIntSplit64::compress(data.data(), nullptr, compressed.get(), tuple_count, cascade_level);
+
+  std::vector<s64> decoded(tuple_count + 64);
+  SubIntSplit64::decompress(decoded.data(), compressed.get(), tuple_count, 0);
+
+  for (u32 i = 0; i < tuple_count; i++) {
+    EXPECT_EQ(decoded[i], data[i]) << "row " << i;
+    if (decoded[i] != data[i]) {
+      break;
+    }
+  }
+  return size;
+}
+// -------------------------------------------------------------------------------------
+}  // namespace
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, Begin) {
+  BtrBlocksConfig::get().integers.schemes = defaultIntegerSchemes();
+  BtrBlocksConfig::get().integers.schemes.enable(IntegerSchemeType::SUB_INT_SPLIT);
+  SchemePool::refresh();
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, RoundTripSnowflake) {
+  roundTrip64(makeSnowflake64(65536));
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, RoundTripEdgeSizes) {
+  for (const u32 count : {0u, 1u, 7u, 127u, 128u, 129u, 640u, 65536u}) {
+    SCOPED_TRACE("tuple_count = " + std::to_string(count));
+    roundTrip64(makeSnowflake64(count));
+  }
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, RoundTripValueEdges) {
+  const u32 count = 4096;
+
+  {
+    SCOPED_TRACE("all zero");
+    roundTrip64(std::vector<s64>(count, 0));
+  }
+  {
+    SCOPED_TRACE("all same");
+    roundTrip64(std::vector<s64>(count, 0x0123456789ABCDEFll));
+  }
+  {
+    // Every bit set, which puts the sign bit inside the top section.
+    SCOPED_TRACE("all bits set");
+    roundTrip64(std::vector<s64>(count, -1));
+  }
+  {
+    SCOPED_TRACE("negatives");
+    std::vector<s64> data(count);
+    for (u32 i = 0; i < count; i++) {
+      data[i] = -static_cast<s64>(i) - 1;
+    }
+    roundTrip64(data);
+  }
+  {
+    SCOPED_TRACE("extremes");
+    std::vector<s64> data(count);
+    for (u32 i = 0; i < count; i++) {
+      data[i] = (i % 2 == 0) ? std::numeric_limits<s64>::min() : std::numeric_limits<s64>::max();
+    }
+    roundTrip64(data);
+  }
+  {
+    SCOPED_TRACE("uniform random");
+    std::mt19937_64 gen(29);
+    std::vector<s64> data(count);
+    for (auto& value : data) {
+      value = static_cast<s64>(gen());
+    }
+    roundTrip64(data);
+  }
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, EncodedSizeNeverExceedsRaw) {
+  std::mt19937_64 gen(31);
+  const u32 count = 32768;
+  std::vector<s64> data(count);
+  for (auto& value : data) {
+    value = static_cast<s64>(gen());
+  }
+
+  const u32 size = roundTrip64(data);
+  const u32 raw = count * sizeof(s64);
+  ASSERT_LE(size, raw + 64) << "encoded " << size << " vs raw " << raw;
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, TerminatesAtEveryCascadeDepth) {
+  const auto data = makeSnowflake64(8192);
+  for (u8 depth = 1; depth <= 4; depth++) {
+    SCOPED_TRACE("max_cascade_depth = " + std::to_string(depth));
+    roundTrip64(data, depth);
+  }
+}
+// -------------------------------------------------------------------------------------
+// Every section must be at most 32 bits, since a section is handed to the
+// 32-bit scheme picker, and none may be SubIntSplit itself. The 64-bit path is
+// where the nesting guard matters most: it is free-standing, so it always
+// starts at the shallowest cascade depth.
+TEST(SubIntSplit64, SectionsFitTheThirtyTwoBitPool) {
+  const auto data = makeSnowflake64(16384);
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
+
+  ASSERT_EQ(ThreadCache::get().compression_level, 0);
+  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+  ASSERT_EQ(ThreadCache::get().compression_level, 0);
+
+  const auto* header = reinterpret_cast<const SubIntSplitHeader*>(compressed.get());
+  const auto* descriptors = reinterpret_cast<const SectionDescriptor*>(header->data);
+  ASSERT_EQ(header->value_bits, 64);
+  ASSERT_GT(header->section_count, 1) << "structured input should have been split";
+
+  for (u8 s = 0; s < header->section_count; s++) {
+    const int width = descriptors[s].bit_end - descriptors[s].bit_start + 1;
+    ASSERT_LE(width, 32) << "section " << static_cast<int>(s) << " is too wide for the pool";
+    ASSERT_NE(descriptors[s].scheme_code, CB(IntegerSchemeType::SUB_INT_SPLIT))
+        << "section " << static_cast<int>(s) << " recursed into SubIntSplit";
+  }
+}
+// -------------------------------------------------------------------------------------
+// Data encoded at one width must not be decodable at the other. Both widths
+// share a format, so without the check a 64-bit encoding read as 32-bit would
+// silently produce garbage.
+TEST(SubIntSplit64, RejectsWidthMismatch) {
+  const auto data = makeSnowflake64(1024);
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
+  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+
+  std::vector<u32> decoded(data.size() + 64);
+  ASSERT_THROW(SubIntSplitCore<u32>::decode(decoded.data(), compressed.get(),
+                                            static_cast<u32>(data.size()), 0),
+               Generic_Exception);
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, GatherMatchesDecompress) {
+  const auto data = makeSnowflake64(20000);
+  const auto tuple_count = static_cast<u32>(data.size());
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(tuple_count));
+  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), tuple_count, 3);
+
+  std::mt19937 gen(37);
+  std::vector<u32> positions(1024);
+  for (auto& position : positions) {
+    position = gen() % tuple_count;
+  }
+
+  std::vector<s64> gathered(positions.size());
+  SubIntSplit64::gather(gathered.data(), compressed.get(), tuple_count, positions.data(),
+                        static_cast<u32>(positions.size()), 0);
+
+  for (std::size_t i = 0; i < positions.size(); i++) {
+    ASSERT_EQ(gathered[i], data[positions[i]]) << "row " << positions[i];
+  }
+  ASSERT_EQ(SubIntSplit64::lookupAt(compressed.get(), tuple_count, 4321, 0), data[4321]);
+}
+// -------------------------------------------------------------------------------------
+// The control arm the benchmark compares the planner against: the naive
+// halves-split, driven through the same machinery so only the boundaries differ.
+TEST(SubIntSplit64, ForcedHalvesSplit) {
+  const auto data = makeSnowflake64(16384);
+
+  std::vector<SegmentPlan> boundaries;
+  ASSERT_TRUE(parseSplitBoundaries("0-31;32-63", 64, boundaries));
+
+  EnforceSplitBoundaries enforcer(boundaries);
+  roundTrip64(data);
+
+  auto compressed = makeBytesArray(SubIntSplit64::maxCompressedSize(data.size()));
+  SubIntSplit64::compress(data.data(), nullptr, compressed.get(), static_cast<u32>(data.size()), 3);
+  ASSERT_EQ(SubIntSplit64::sectionCount(compressed.get()), 2);
+  ASSERT_NE(SubIntSplit64::fullDescription(compressed.get()).find("0-31;32-63"), std::string::npos);
+}
+// -------------------------------------------------------------------------------------
+// The whole point: a planned split should beat the naive halves split on data
+// whose fields do not fall on a 32-bit boundary.
+TEST(SubIntSplit64, PlannedSplitBeatsHalvesSplit) {
+  const auto data = makeSnowflake64(65536, 3);
+
+  u32 halves_size = 0;
+  {
+    std::vector<SegmentPlan> boundaries;
+    ASSERT_TRUE(parseSplitBoundaries("0-31;32-63", 64, boundaries));
+    EnforceSplitBoundaries enforcer(boundaries);
+    halves_size = roundTrip64(data);
+  }
+  const u32 planned_size = roundTrip64(data);
+
+  ASSERT_LT(planned_size, halves_size)
+      << "planned " << planned_size << " vs halves " << halves_size;
+}
+// -------------------------------------------------------------------------------------
+TEST(SubIntSplit64, End) {
+  BtrBlocksConfig::get().integers.schemes = defaultIntegerSchemes();
+  SchemePool::refresh();
+}
+// -------------------------------------------------------------------------------------

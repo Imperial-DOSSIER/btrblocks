@@ -32,6 +32,32 @@ void Uncompressed::decompress(INTEGER* dest,
   std::memcpy(dest, src, column_size);
 }
 // -------------------------------------------------------------------------------------
+void Uncompressed::gather(INTEGER* dest,
+                          const u8* src,
+                          BitmapWrapper*,
+                          u32 tuple_count,
+                          const u32* positions,
+                          u32 position_count,
+                          u32) {
+  // Matches the base class: an empty chunk yields nothing rather than reading
+  // past the buffer. The two must agree, since the point of the API is that
+  // schemes are interchangeable through it.
+  if (tuple_count == 0 || position_count == 0) {
+    return;
+  }
+  const auto* values = reinterpret_cast<const INTEGER*>(src);
+  for (u32 i = 0; i < position_count; i++) {
+    dest[i] = values[positions[i]];
+  }
+}
+// -------------------------------------------------------------------------------------
+INTEGER Uncompressed::lookupAt(const u8* src, BitmapWrapper*, u32 tuple_count, u32 position, u32) {
+  if (tuple_count == 0) {
+    return 0;
+  }
+  return reinterpret_cast<const INTEGER*>(src)[position];
+}
+// -------------------------------------------------------------------------------------
 INTEGER Uncompressed::lookup(u32) {
   UNREACHABLE();
 }

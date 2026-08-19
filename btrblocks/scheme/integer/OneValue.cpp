@@ -38,6 +38,31 @@ void OneValue::decompress(INTEGER* dest,
   }
 }
 // -------------------------------------------------------------------------------------
+void OneValue::gather(INTEGER* dest,
+                      const u8* src,
+                      BitmapWrapper*,
+                      u32 tuple_count,
+                      const u32*,
+                      u32 position_count,
+                      u32) {
+  // Matches the base class: an empty chunk yields nothing. The two must agree,
+  // since the point of the API is that schemes are interchangeable through it.
+  if (tuple_count == 0 || position_count == 0) {
+    return;
+  }
+  const auto& col_struct = *reinterpret_cast<const OneValueStructure*>(src);
+  for (u32 i = 0; i < position_count; i++) {
+    dest[i] = col_struct.one_value;
+  }
+}
+// -------------------------------------------------------------------------------------
+INTEGER OneValue::lookupAt(const u8* src, BitmapWrapper*, u32 tuple_count, u32, u32) {
+  if (tuple_count == 0) {
+    return 0;
+  }
+  return reinterpret_cast<const OneValueStructure*>(src)->one_value;
+}
+// -------------------------------------------------------------------------------------
 INTEGER OneValue::lookup(u32) {
   UNREACHABLE();
 }
