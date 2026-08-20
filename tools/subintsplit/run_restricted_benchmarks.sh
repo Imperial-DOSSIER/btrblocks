@@ -133,7 +133,8 @@ python3 tools/subintsplit/make_tables.py \
   --results "$RESULTS_CSV" \
   --sections "$SECTIONS_CSV" \
   --out-dir "$OUT_DIR" \
-  --trivial-ratio "$TRIVIAL_RATIO"
+  --trivial-ratio "$TRIVIAL_RATIO" \
+  --regenerate-cmd "tools/subintsplit/run_restricted_benchmarks.sh"
 
 echo
 echo "Done. Start at $OUT_DIR/README.md"

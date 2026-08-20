@@ -253,6 +253,12 @@ def main() -> None:
         default=1.01,
         help="at or below this ratio a row cannot win a column (default: 1.01)",
     )
+    parser.add_argument(
+        "--regenerate-cmd",
+        default="tools/subintsplit/run_benchmarks.sh",
+        help="command shown in the generated README as how to regenerate these tables"
+        " (default: tools/subintsplit/run_benchmarks.sh)",
+    )
     args = parser.parse_args()
 
     results, sections = load(args.results, args.sections)
@@ -281,7 +287,7 @@ def main() -> None:
         " Do not edit by hand — regenerate with:",
         "",
         "```",
-        "tools/subintsplit/run_benchmarks.sh",
+        args.regenerate_cmd,
         "```",
         "",
         "Each file compares every integer codec on every dataset at one block size. Start with"
