@@ -40,6 +40,35 @@ Then, depending on your usecase, build only the library or any of the tools:
 
 For a list of all valid targets, run `make help`.
 
+### On a current toolchain
+
+Three things bite on a 2026-era toolchain. Verified on Ubuntu, CMake 4.2.3, GCC 15.2.
+
+**CMake 4 rejects the vendored dependencies.** `fastpfor`, `fsst` and `croaring` declare
+`cmake_minimum_required` below 3.5, which CMake 4 no longer accepts. Set the environment
+variable, which propagates into the `ExternalProject` sub-builds — a `-D` cache variable
+does not:
+
+``` sh
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+cmake .. && make
+```
+
+**The tests need their dataset generated first.** `tester` does not create it; run the
+generator from the build directory, which writes a relative `test-dataset/` (13 MB).
+Without it, twelve tests fail and the binary dies in `mmap` on a missing file, which looks
+like a crash but is only the absent data:
+
+``` sh
+make test_dataset_generator && ./test_dataset_generator
+./tester   # 77/77 pass
+```
+
+**`make` (all) fails on the AWS SDK unless libcurl development headers are installed.**
+Only `bench_dataset_downloader` and `decompression-speed-s3` need it, so the library,
+the tests and every other tool build without it. Either install `libcurl4-openssl-dev` or
+build the targets you want by name.
+
 Library was built and tested on Linux (x86, ARM) and MacOS (ARM).
 
 ## Additional schemes

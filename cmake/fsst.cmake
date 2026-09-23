@@ -25,6 +25,10 @@ ExternalProject_Add(
         -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/vendor/fsst
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE}
+        # upstream fsst (pinned at 0f0f905, 2021) does `typedef uint8_t u8;` in
+        # libfsst.hpp without including <cstdint>, relying on transitive inclusion
+        # that libstdc++ dropped. GCC 15 then fails with ~380 cascading errors.
+        "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -include cstdint"
 )
 
 ExternalProject_Get_Property(fsst_src source_dir)
